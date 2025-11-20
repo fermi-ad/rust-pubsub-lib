@@ -1,0 +1,17 @@
+name: Rust Continuous Integration
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  run-tests-and-coverage:
+    uses: fermi-ad/.github/.github/workflows/rust-integration.yaml@02de88f39fb7a7dd994414898abaef606153fb5a
+    secrets: inherit
+    permissions:
+      contents: write
+      pull-requests: write

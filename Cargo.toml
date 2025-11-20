@@ -1,0 +1,10 @@
+[package]
+name = "fermi-rust-pubsub-lib"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+kafka = "0.10.0"
+tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread"] }
+tokio-stream = { version = "0.1.17", features = ["sync"] }
+tracing = { version = "0.1.41", features = ["log"] }
