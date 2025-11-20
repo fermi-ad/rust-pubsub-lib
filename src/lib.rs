@@ -147,7 +147,7 @@ impl Publisher {
 }
 impl Debug for Publisher {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("KafkaProducer")
+        f.debug_struct("Publisher")
             .field("host", &self.producer.client().hosts())
             .field("topic", &self.topic)
             .finish()
