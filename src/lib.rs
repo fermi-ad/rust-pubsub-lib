@@ -78,7 +78,7 @@ impl Subscriber {
             .create()
             .map_err(|err| {
                 error!("{}", err);
-                PubSubError::new()
+                PubSubError::default()
             })
     }
     fn from(consumer: Consumer) -> Self {
@@ -130,7 +130,7 @@ impl Publisher {
             Ok(producer) => Ok(Self { producer, topic }),
             Err(err) => {
                 error!("{}", err);
-                Err(PubSubError::new())
+                Err(PubSubError::default())
             }
         }
     }
@@ -141,7 +141,7 @@ impl Publisher {
             .send(&Record::from_value(self.topic.as_str(), message.as_bytes()))
             .map_err(|err| {
                 error!("{}", err);
-                PubSubError::new()
+                PubSubError::default()
             })
     }
 }
@@ -160,8 +160,8 @@ const CANNED_ERR_MESSAGE: &str = "An error occurred while attempting to connect 
 pub struct PubSubError {
     message: &'static str,
 }
-impl PubSubError {
-    pub fn new() -> Self {
+impl Default for PubSubError {
+    fn default() -> Self {
         Self {
             message: CANNED_ERR_MESSAGE,
         }
@@ -180,7 +180,7 @@ mod tests {
 
     #[test]
     fn pubsub_error_display() {
-        let err = PubSubError::new();
+        let err = PubSubError::default();
         assert_eq!(CANNED_ERR_MESSAGE, format!("{}", err));
     }
 
@@ -213,6 +213,6 @@ mod tests {
     #[test]
     fn handles_err() {
         assert_eq!(MessageJob::handle::<PubSubError>(Ok(())), ());
-        assert_eq!(MessageJob::handle(Err(PubSubError::new())), ());
+        assert_eq!(MessageJob::handle(Err(PubSubError::default())), ());
     }
 }
