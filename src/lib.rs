@@ -7,7 +7,7 @@ use std::{
     env,
     error::Error,
     fmt::{self, Debug},
-    sync::Arc,
+    sync::{Arc, mpsc},
     thread,
     time::Duration,
 };
@@ -15,51 +15,125 @@ use tokio::sync::broadcast::{self, Receiver, Sender};
 use tokio_stream::wrappers::BroadcastStream;
 use tracing::error;
 
+fn handle<E: Error>(result: Result<(), E>) {
+    match result {
+        Ok(_) => (),
+        Err(err) => error!("{}", err),
+    }
+}
+
+const KAFKA_HOST: &str = "KAFKA_HOST";
+const DEFAULT_KAFKA_HOST: &str = "acsys-services.fnal.gov:9092";
+fn get_connection<T: Send + 'static>(
+    connect: impl Fn(String) -> Result<T, PubSubError> + Send + 'static,
+) -> Result<T, PubSubError> {
+    let host = env::var(KAFKA_HOST).unwrap_or_else(|_| String::from(DEFAULT_KAFKA_HOST));
+    let (sender, receiver) = mpsc::channel();
+    let _ = thread::spawn(move || {
+        let connection = connect(host);
+        handle(sender.send(connection));
+    });
+    match receiver.recv_timeout(Duration::from_secs(1)) {
+        Ok(result) => result,
+        Err(err) => {
+            error!("{}", err);
+            Err(PubSubError::default())
+        }
+    }
+}
+
+fn get_consumer(topic: String) -> Result<Consumer, PubSubError> {
+    get_connection(move |host: String| {
+        Consumer::from_hosts(vec![host])
+            .with_topic(topic.clone())
+            .with_fallback_offset(FetchOffset::Earliest)
+            .with_offset_storage(Some(GroupOffsetStorage::Kafka))
+            .create()
+            .map_err(|err| {
+                error!("{}", err);
+                PubSubError::default()
+            })
+    })
+}
+
+/// A structure for retrieving a snapshot of a message topic.
+/// Exposes the `for_topic` method, which connects to the message broker,
+/// loads all messages currently on the specified topic, and returns them
+/// to the caller.
+#[derive(Debug)]
+pub struct Snapshot {
+    pub data: Vec<String>,
+}
+impl Snapshot {
+    pub fn for_topic(topic: String) -> Result<Self, PubSubError> {
+        let mut consumer = get_consumer(topic)?;
+        let mut data: Vec<String> = Vec::new();
+
+        let mut cur_size: usize = 0;
+        loop {
+            match do_poll(&mut consumer, |msg: String| {
+                data.push(msg);
+                Result::<(), PubSubError>::Ok(())
+            }) {
+                Ok(_) => {
+                    if cur_size < data.len() {
+                        cur_size = data.len();
+                    } else {
+                        break;
+                    }
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(Self { data })
+    }
+}
+
+fn do_poll<R, E: Error>(
+    consumer: &mut Consumer,
+    mut append_msg: impl FnMut(String) -> Result<R, E>,
+) -> Result<(), PubSubError> {
+    match consumer.poll() {
+        Ok(message_sets) => {
+            for set in message_sets.iter() {
+                for msg in set.messages() {
+                    match str::from_utf8(msg.value) {
+                        Ok(decoded) => match append_msg(decoded.to_owned()) {
+                            Ok(_) => (),
+                            Err(err) => {
+                                handle(Err(err));
+                                return Err(PubSubError::default());
+                            }
+                        },
+                        Err(err) => error!("{}", err),
+                    };
+                }
+                handle(consumer.consume_messageset(set));
+            }
+            handle(consumer.commit_consumed());
+        }
+        Err(err) => {
+            error!("{}", err);
+            let _ = append_msg(String::from(
+                "An error occurred while consuming messages. See server logs for details. Closing stream.",
+            ));
+            return Err(PubSubError::default());
+        }
+    };
+    Ok(())
+}
+
 struct MessageJob {
     consumer: Consumer,
     sender: Arc<Sender<String>>,
 }
 impl MessageJob {
-    fn handle<E: Error>(result: Result<(), E>) {
-        match result {
-            Ok(_) => (),
-            Err(err) => error!("{}", err),
-        }
-    }
-
     pub fn run(&mut self) {
-        loop {
-            match self.consumer.poll() {
-                Ok(message_sets) => {
-                    for set in message_sets.iter() {
-                        for msg in set.messages() {
-                            match str::from_utf8(msg.value) {
-                                Ok(decoded) => match self.sender.send(decoded.to_owned()) {
-                                    Ok(_) => (),
-                                    Err(err) => {
-                                        error!("{}", err);
-                                        return;
-                                    }
-                                },
-                                Err(err) => error!("{}", err),
-                            };
-                        }
-                        Self::handle(self.consumer.consume_messageset(set));
-                    }
-                    Self::handle(self.consumer.commit_consumed());
-                }
-                Err(err) => {
-                    error!("{}", err);
-                    let _ = self.sender.send(String::from("An error occurred while consuming messages. See server logs for details. Closing stream."));
-                    break;
-                }
-            };
+        while do_poll(&mut self.consumer, |msg: String| self.sender.send(msg)).is_ok() {
             thread::sleep(Duration::from_millis(100));
         }
     }
 }
-
-const DEFAULT_KAFKA_ADDR: &str = "acsys-services.fnal.gov:9092";
 
 /// A structure for subscribing to a message topic. Returns the values as a stream of messages for clients to handle.
 #[derive(Debug)]
@@ -69,18 +143,6 @@ pub struct Subscriber {
     sender: Arc<Sender<String>>,
 }
 impl Subscriber {
-    fn get_consumer(topic: String) -> Result<Consumer, PubSubError> {
-        let addr = env::var("KAFKA_HOST_ADDR").unwrap_or_else(|_| String::from(DEFAULT_KAFKA_ADDR));
-        Consumer::from_hosts(vec![addr])
-            .with_topic(topic)
-            .with_fallback_offset(FetchOffset::Earliest)
-            .with_offset_storage(Some(GroupOffsetStorage::Kafka))
-            .create()
-            .map_err(|err| {
-                error!("{}", err);
-                PubSubError::default()
-            })
-    }
     fn from(consumer: Consumer) -> Self {
         let (sender, _channel_lock) = broadcast::channel::<String>(20);
         let thread_sender = Arc::new(sender);
@@ -103,7 +165,7 @@ impl Subscriber {
     /// A new thread will be started and run in the background to poll for
     /// messages. The thread will terminate when this subscriber is dropped.
     pub fn for_topic(topic: String) -> Result<Self, PubSubError> {
-        let consumer = Self::get_consumer(topic)?;
+        let consumer = get_consumer(topic)?;
         Ok(Self::from(consumer))
     }
 
@@ -121,18 +183,17 @@ pub struct Publisher {
 impl Publisher {
     /// Configures a publisher for the provided topic.
     pub fn for_topic(topic: String) -> Result<Self, PubSubError> {
-        let addr = env::var("KAFKA_HOST_ADDR").unwrap_or_else(|_| String::from(DEFAULT_KAFKA_ADDR));
-        let result = Producer::from_hosts(vec![addr])
-            .with_ack_timeout(Duration::from_secs(1))
-            .with_required_acks(RequiredAcks::One)
-            .create();
-        match result {
-            Ok(producer) => Ok(Self { producer, topic }),
-            Err(err) => {
-                error!("{}", err);
-                Err(PubSubError::default())
-            }
-        }
+        get_connection(|host: String| {
+            Producer::from_hosts(vec![host])
+                .with_ack_timeout(Duration::from_secs(1))
+                .with_required_acks(RequiredAcks::One)
+                .create()
+                .map_err(|err| {
+                    error!("{}", err);
+                    PubSubError::default()
+                })
+        })
+        .map(|producer| Self { producer, topic })
     }
 
     /// Sends the provided message to the configured topic.
@@ -186,33 +247,28 @@ mod tests {
 
     #[test]
     fn error_on_bad_kafka_consumer_host() {
-        unsafe {
-            env::set_var("KAFKA_HOST_ADDR", "bad_host");
-        }
         let result = Subscriber::for_topic(String::from("my_topic"));
         let err = result.expect_err("Expected the connection to fail, but it succeeded");
         assert_eq!(CANNED_ERR_MESSAGE, format!("{}", err));
-        unsafe {
-            env::remove_var("KAFKA_HOST_ADDR");
-        }
     }
 
     #[test]
     fn error_on_bad_kafka_producer_host() {
-        unsafe {
-            env::set_var("KAFKA_HOST_ADDR", "bad_host");
-        }
         let result = Publisher::for_topic(String::from("my_topic"));
         let err = result.expect_err("Expected the connection to fail, but it succeeded");
         assert_eq!(CANNED_ERR_MESSAGE, format!("{}", err));
-        unsafe {
-            env::remove_var("KAFKA_HOST_ADDR");
-        }
+    }
+
+    #[test]
+    fn error_on_bad_snapshot_host() {
+        let result = Snapshot::for_topic(String::from("my_topic"));
+        let err = result.expect_err("Expected the connection to fail, but it succeeded");
+        assert_eq!(CANNED_ERR_MESSAGE, format!("{}", err));
     }
 
     #[test]
     fn handles_err() {
-        assert_eq!(MessageJob::handle::<PubSubError>(Ok(())), ());
-        assert_eq!(MessageJob::handle(Err(PubSubError::default())), ());
+        assert_eq!(handle::<PubSubError>(Ok(())), ());
+        assert_eq!(handle(Err(PubSubError::default())), ());
     }
 }
