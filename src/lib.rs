@@ -56,39 +56,6 @@ fn get_consumer(topic: String) -> Result<Consumer, PubSubError> {
     })
 }
 
-/// A structure for retrieving a snapshot of a message topic.
-/// Exposes the `for_topic` method, which connects to the message broker,
-/// loads all messages currently on the specified topic, and returns them
-/// to the caller.
-#[derive(Debug)]
-pub struct Snapshot {
-    pub data: Vec<String>,
-}
-impl Snapshot {
-    pub fn for_topic(topic: String) -> Result<Self, PubSubError> {
-        let mut consumer = get_consumer(topic)?;
-        let mut data: Vec<String> = Vec::new();
-
-        let mut cur_size: usize = 0;
-        loop {
-            match do_poll(&mut consumer, |msg: String| {
-                data.push(msg);
-                Result::<(), PubSubError>::Ok(())
-            }) {
-                Ok(_) => {
-                    if cur_size < data.len() {
-                        cur_size = data.len();
-                    } else {
-                        break;
-                    }
-                }
-                Err(err) => return Err(err),
-            }
-        }
-        Ok(Self { data })
-    }
-}
-
 fn do_poll<R, E: Error>(
     consumer: &mut Consumer,
     mut append_msg: impl FnMut(String) -> Result<R, E>,
@@ -121,6 +88,40 @@ fn do_poll<R, E: Error>(
         }
     };
     Ok(())
+}
+
+/// A structure for retrieving a snapshot of a message topic.
+/// Exposes the `for_topic` method, which connects to the message broker,
+/// loads all messages currently on the specified topic, and returns them
+/// to the caller.
+#[derive(Debug)]
+pub struct Snapshot {
+    pub data: Vec<String>,
+}
+impl Snapshot {
+    /// Generates a snapshot of the messages on the given topic
+    pub fn for_topic(topic: String) -> Result<Self, PubSubError> {
+        let mut consumer = get_consumer(topic)?;
+        let mut data: Vec<String> = Vec::new();
+
+        let mut cur_size: usize = 0;
+        loop {
+            match do_poll(&mut consumer, |msg: String| {
+                data.push(msg);
+                Result::<(), PubSubError>::Ok(())
+            }) {
+                Ok(_) => {
+                    if cur_size < data.len() {
+                        cur_size = data.len();
+                    } else {
+                        break;
+                    }
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(Self { data })
+    }
 }
 
 struct MessageJob {
