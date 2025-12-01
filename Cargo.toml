@@ -1,5 +1,5 @@
 [package]
-name = "fermi-rust-pubsub-lib"
+name = "rust-pubsub-lib"
 version = "0.1.0"
 edition = "2024"
 

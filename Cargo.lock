@@ -67,16 +67,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fermi-rust-pubsub-lib"
-version = "0.1.0"
-dependencies = [
- "kafka",
- "tokio",
- "tokio-stream",
- "tracing",
-]
-
-[[package]]
 name = "find-msvc-tools"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -295,6 +285,16 @@ name = "ref_slice"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f4ed1d73fb92eba9b841ba2aef69533a060ccc0d3ec71c90aeda5996d4afb7a9"
+
+[[package]]
+name = "rust-pubsub-lib"
+version = "0.1.0"
+dependencies = [
+ "kafka",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+]
 
 [[package]]
 name = "shlex"
