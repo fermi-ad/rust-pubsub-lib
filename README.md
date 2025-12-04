@@ -7,6 +7,7 @@ The primary abstractions provided by this library are the `Publisher`, `Snapshot
 #### Required environment variables
 For this lib to operate successfully, the following environment variables must be set:
 - `KAFKA_HOST` -> At time of writing, Kafka is the message broker/pub-sub service of choice. This variable specifies the location of the Kafka instance to connect to.
+- `KAFKA_CONNECTION_SECONDS` -> The number of seconds to wait for a connection to Kafka
 
 ## Docs
 

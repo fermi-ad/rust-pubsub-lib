@@ -3,8 +3,8 @@ use kafka::{
     consumer::Consumer,
     producer::{Producer, Record},
 };
+use rust_env_var_lib::env_var;
 use std::{
-    env,
     error::Error,
     fmt::{self, Debug},
     sync::{Arc, mpsc},
@@ -24,16 +24,19 @@ fn handle<E: Error>(result: Result<(), E>) {
 
 const KAFKA_HOST: &str = "KAFKA_HOST";
 const DEFAULT_KAFKA_HOST: &str = "acsys-services.fnal.gov:9092";
+const KAFKA_CONN_SECS: &str = "KAFKA_CONNECTION_SECONDS";
+const DEFAULT_CONN_TIME: u64 = 1;
 fn get_connection<T: Send + 'static>(
     connect: impl Fn(String) -> Result<T, PubSubError> + Send + 'static,
 ) -> Result<T, PubSubError> {
-    let host = env::var(KAFKA_HOST).unwrap_or_else(|_| String::from(DEFAULT_KAFKA_HOST));
+    let host = env_var::get(KAFKA_HOST).or(String::from(DEFAULT_KAFKA_HOST));
     let (sender, receiver) = mpsc::channel();
     let _ = thread::spawn(move || {
         let connection = connect(host);
         handle(sender.send(connection));
     });
-    match receiver.recv_timeout(Duration::from_secs(1)) {
+    let connection_seconds = env_var::get(KAFKA_CONN_SECS).or(DEFAULT_CONN_TIME);
+    match receiver.recv_timeout(Duration::from_secs(connection_seconds)) {
         Ok(result) => result,
         Err(err) => {
             error!("{}", err);
