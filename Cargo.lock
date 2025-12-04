@@ -287,10 +287,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f4ed1d73fb92eba9b841ba2aef69533a060ccc0d3ec71c90aeda5996d4afb7a9"
 
 [[package]]
+name = "rust-env-var-lib"
+version = "1.0.0"
+source = "git+https://github.com/fermi-ad/rust-env-var-lib.git?tag=v1.0.0#19651a24e70ea00ec3d6b5f19aa16f88bf48b849"
+dependencies = [
+ "tracing",
+]
+
+[[package]]
 name = "rust-pubsub-lib"
 version = "0.1.0"
 dependencies = [
  "kafka",
+ "rust-env-var-lib",
  "tokio",
  "tokio-stream",
  "tracing",
