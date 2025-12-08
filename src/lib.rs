@@ -15,6 +15,42 @@ use tokio::sync::broadcast::{self, Receiver, Sender};
 use tokio_stream::wrappers::BroadcastStream;
 use tracing::error;
 
+/// A message from the pub-sub service.
+/// Contains a key (optional) and a value.
+///
+/// Instances may be created with the `new` method (specifying both key and value)
+/// or the `from_value` method (specifying only the value).
+#[derive(Debug, Clone)]
+pub struct Message {
+    pub key: Option<String>,
+    pub value: String,
+}
+impl Message {
+    /// Creates a new message with the provided key and value.
+    ///
+    /// ### Arguments
+    /// * `key` - An optional key for the message.
+    /// * `value` - The value of the message.
+    pub fn new(key: Option<String>, value: String) -> Self {
+        Self { key, value }
+    }
+
+    /// Creates a new message with the provided value and no key.
+    ///
+    /// ### Arguments
+    /// * `value` - The value of the message.
+    pub fn from_value(value: String) -> Self {
+        Self { key: None, value }
+    }
+
+    fn into_record(self, topic: &str) -> Record<'_, Vec<u8>, Vec<u8>> {
+        match self.key {
+            Some(k) => Record::from_key_value(topic, k.into_bytes(), self.value.into_bytes()),
+            None => Record::from_key_value(topic, Vec::new(), self.value.into_bytes()),
+        }
+    }
+}
+
 fn handle<E: Error>(result: Result<(), E>) {
     match result {
         Ok(_) => (),
@@ -61,14 +97,21 @@ fn get_consumer(topic: String) -> Result<Consumer, PubSubError> {
 
 fn do_poll<R, E: Error>(
     consumer: &mut Consumer,
-    mut append_msg: impl FnMut(String) -> Result<R, E>,
+    mut append_msg: impl FnMut(Message) -> Result<R, E>,
 ) -> Result<(), PubSubError> {
     match consumer.poll() {
         Ok(message_sets) => {
             for set in message_sets.iter() {
                 for msg in set.messages() {
-                    match str::from_utf8(msg.value) {
-                        Ok(decoded) => match append_msg(decoded.to_owned()) {
+                    let key = match String::from_utf8(msg.key.to_vec()) {
+                        Ok(decoded) => Some(decoded),
+                        Err(err) => {
+                            error!("{}", err);
+                            None
+                        }
+                    };
+                    match String::from_utf8(msg.value.to_vec()) {
+                        Ok(value) => match append_msg(Message { key, value }) {
                             Ok(_) => (),
                             Err(err) => {
                                 handle(Err(err));
@@ -84,9 +127,6 @@ fn do_poll<R, E: Error>(
         }
         Err(err) => {
             error!("{}", err);
-            let _ = append_msg(String::from(
-                "An error occurred while consuming messages. See server logs for details. Closing stream.",
-            ));
             return Err(PubSubError::default());
         }
     };
@@ -99,17 +139,17 @@ fn do_poll<R, E: Error>(
 /// to the caller.
 #[derive(Debug)]
 pub struct Snapshot {
-    pub data: Vec<String>,
+    pub data: Vec<Message>,
 }
 impl Snapshot {
     /// Generates a snapshot of the messages on the given topic
     pub fn for_topic(topic: String) -> Result<Self, PubSubError> {
         let mut consumer = get_consumer(topic)?;
-        let mut data: Vec<String> = Vec::new();
+        let mut data: Vec<Message> = Vec::new();
 
         let mut cur_size: usize = 0;
         loop {
-            match do_poll(&mut consumer, |msg: String| {
+            match do_poll(&mut consumer, |msg: Message| {
                 data.push(msg);
                 Result::<(), PubSubError>::Ok(())
             }) {
@@ -129,11 +169,11 @@ impl Snapshot {
 
 struct MessageJob {
     consumer: Consumer,
-    sender: Arc<Sender<String>>,
+    sender: Arc<Sender<Message>>,
 }
 impl MessageJob {
     pub fn run(&mut self) {
-        while do_poll(&mut self.consumer, |msg: String| self.sender.send(msg)).is_ok() {
+        while do_poll(&mut self.consumer, |msg: Message| self.sender.send(msg)).is_ok() {
             thread::sleep(Duration::from_millis(100));
         }
     }
@@ -143,12 +183,12 @@ impl MessageJob {
 #[derive(Debug)]
 pub struct Subscriber {
     /// Keeps the channel open while the subscriber waits for clients to ask for a stream.
-    _channel_lock: Receiver<String>,
-    sender: Arc<Sender<String>>,
+    _channel_lock: Receiver<Message>,
+    sender: Arc<Sender<Message>>,
 }
 impl Subscriber {
     fn from(consumer: Consumer) -> Self {
-        let (sender, _channel_lock) = broadcast::channel::<String>(20);
+        let (sender, _channel_lock) = broadcast::channel::<Message>(20);
         let thread_sender = Arc::new(sender);
         let instance_sender = Arc::clone(&thread_sender);
         let mut message_job = MessageJob {
@@ -174,7 +214,7 @@ impl Subscriber {
     }
 
     /// Streams messages that appear on the subscribed topic.
-    pub fn get_stream(&self) -> BroadcastStream<String> {
+    pub fn get_stream(&self) -> BroadcastStream<Message> {
         BroadcastStream::new(self.sender.subscribe())
     }
 }
@@ -201,9 +241,9 @@ impl Publisher {
     }
 
     /// Sends the provided message to the configured topic.
-    pub fn publish(&mut self, message: String) -> Result<(), PubSubError> {
+    pub fn publish(&mut self, message: Message) -> Result<(), PubSubError> {
         self.producer
-            .send(&Record::from_value(self.topic.as_str(), message.as_bytes()))
+            .send(&message.into_record(&self.topic))
             .map_err(|err| {
                 error!("{}", err);
                 PubSubError::default()
