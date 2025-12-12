@@ -58,17 +58,14 @@ fn handle<E: Error>(result: Result<(), E>) {
     }
 }
 
-const KAFKA_HOST: &str = "KAFKA_HOST";
-const DEFAULT_KAFKA_HOST: &str = "acsys-services.fnal.gov:9092";
 const KAFKA_CONN_SECS: &str = "KAFKA_CONNECTION_SECONDS";
 const DEFAULT_CONN_TIME: u64 = 1;
 fn get_connection<T: Send + 'static>(
-    connect: impl Fn(String) -> Result<T, PubSubError> + Send + 'static,
+    connect: impl Fn() -> Result<T, PubSubError> + Send + 'static,
 ) -> Result<T, PubSubError> {
-    let host = env_var::get(KAFKA_HOST).or(String::from(DEFAULT_KAFKA_HOST));
     let (sender, receiver) = mpsc::channel();
     let _ = thread::spawn(move || {
-        let connection = connect(host);
+        let connection = connect();
         handle(sender.send(connection));
     });
     let connection_seconds = env_var::get(KAFKA_CONN_SECS).or(DEFAULT_CONN_TIME);
@@ -81,9 +78,9 @@ fn get_connection<T: Send + 'static>(
     }
 }
 
-fn get_consumer(topic: String) -> Result<Consumer, PubSubError> {
-    get_connection(move |host: String| {
-        Consumer::from_hosts(vec![host])
+fn get_consumer(host: String, topic: String) -> Result<Consumer, PubSubError> {
+    get_connection(move || {
+        Consumer::from_hosts(vec![host.clone()])
             .with_topic(topic.clone())
             .with_fallback_offset(FetchOffset::Earliest)
             .with_offset_storage(Some(GroupOffsetStorage::Kafka))
@@ -142,9 +139,9 @@ pub struct Snapshot {
     pub data: Vec<Message>,
 }
 impl Snapshot {
-    /// Generates a snapshot of the messages on the given topic
-    pub fn for_topic(topic: String) -> Result<Self, PubSubError> {
-        let mut consumer = get_consumer(topic)?;
+    /// Generates a snapshot of the messages on the given host and topic
+    pub fn new(host: String, topic: String) -> Result<Self, PubSubError> {
+        let mut consumer = get_consumer(host, topic)?;
         let mut data: Vec<Message> = Vec::new();
 
         let mut cur_size: usize = 0;
@@ -205,11 +202,11 @@ impl Subscriber {
         }
     }
 
-    /// Generates a new subscriber for the provided topic.
+    /// Generates a new subscriber for the provided host and topic.
     /// A new thread will be started and run in the background to poll for
     /// messages. The thread will terminate when this subscriber is dropped.
-    pub fn for_topic(topic: String) -> Result<Self, PubSubError> {
-        let consumer = get_consumer(topic)?;
+    pub fn new(host: String, topic: String) -> Result<Self, PubSubError> {
+        let consumer = get_consumer(host, topic)?;
         Ok(Self::from(consumer))
     }
 
@@ -225,10 +222,10 @@ pub struct Publisher {
     topic: String,
 }
 impl Publisher {
-    /// Configures a publisher for the provided topic.
-    pub fn for_topic(topic: String) -> Result<Self, PubSubError> {
-        get_connection(|host: String| {
-            Producer::from_hosts(vec![host])
+    /// Configures a publisher for the provided host and topic.
+    pub fn new(host: String, topic: String) -> Result<Self, PubSubError> {
+        get_connection(move || {
+            Producer::from_hosts(vec![host.clone()])
                 .with_ack_timeout(Duration::from_secs(1))
                 .with_required_acks(RequiredAcks::One)
                 .create()
@@ -291,21 +288,21 @@ mod tests {
 
     #[test]
     fn error_on_bad_kafka_consumer_host() {
-        let result = Subscriber::for_topic(String::from("my_topic"));
+        let result = Subscriber::new(String::from("myHost"), String::from("my_topic"));
         let err = result.expect_err("Expected the connection to fail, but it succeeded");
         assert_eq!(CANNED_ERR_MESSAGE, format!("{}", err));
     }
 
     #[test]
     fn error_on_bad_kafka_producer_host() {
-        let result = Publisher::for_topic(String::from("my_topic"));
+        let result = Publisher::new(String::from("myHost"), String::from("my_topic"));
         let err = result.expect_err("Expected the connection to fail, but it succeeded");
         assert_eq!(CANNED_ERR_MESSAGE, format!("{}", err));
     }
 
     #[test]
     fn error_on_bad_snapshot_host() {
-        let result = Snapshot::for_topic(String::from("my_topic"));
+        let result = Snapshot::new(String::from("myHost"), String::from("my_topic"));
         let err = result.expect_err("Expected the connection to fail, but it succeeded");
         assert_eq!(CANNED_ERR_MESSAGE, format!("{}", err));
     }
@@ -314,5 +311,34 @@ mod tests {
     fn handles_err() {
         assert_eq!(handle::<PubSubError>(Ok(())), ());
         assert_eq!(handle(Err(PubSubError::default())), ());
+    }
+
+    #[test]
+    fn message_from_value() {
+        let val = String::from("some text");
+        let output = Message::from_value(val.clone());
+        assert_eq!(output.key, None);
+        assert_eq!(output.value, val);
+    }
+
+    #[test]
+    fn message_from_key_value() {
+        let key = Some(String::from("some key"));
+        let val = String::from("some text");
+        let output = Message::new(key.clone(), val.clone());
+        assert_eq!(output.key, key);
+        assert_eq!(output.value, val);
+    }
+
+    #[test]
+    fn message_into_record() {
+        let key = Some(String::from("some key"));
+        let val = String::from("some text");
+        let message = Message::new(key.clone(), val.clone());
+        let topic = "my topic";
+        let output = message.into_record(topic);
+        assert_eq!(output.topic, topic);
+        assert_eq!(output.key, key.unwrap().into_bytes());
+        assert_eq!(output.value, val.into_bytes());
     }
 }
