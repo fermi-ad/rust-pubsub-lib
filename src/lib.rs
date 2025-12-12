@@ -312,4 +312,33 @@ mod tests {
         assert_eq!(handle::<PubSubError>(Ok(())), ());
         assert_eq!(handle(Err(PubSubError::default())), ());
     }
+
+    #[test]
+    fn message_from_value() {
+        let val = String::from("some text");
+        let output = Message::from_value(val.clone());
+        assert_eq!(output.key, None);
+        assert_eq!(output.value, val);
+    }
+
+    #[test]
+    fn message_from_key_value() {
+        let key = Some(String::from("some key"));
+        let val = String::from("some text");
+        let output = Message::new(key.clone(), val.clone());
+        assert_eq!(output.key, key);
+        assert_eq!(output.value, val);
+    }
+
+    #[test]
+    fn message_into_record() {
+        let key = Some(String::from("some key"));
+        let val = String::from("some text");
+        let message = Message::new(key.clone(), val.clone());
+        let topic = "my topic";
+        let output = message.into_record(topic);
+        assert_eq!(output.topic, topic);
+        assert_eq!(output.key, key.unwrap().into_bytes());
+        assert_eq!(output.value, val.into_bytes());
+    }
 }
