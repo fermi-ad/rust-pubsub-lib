@@ -1,0 +1,15 @@
+name: Deploy Docs 
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy-docs:
+    uses: fermi-ad/.github/.github/workflows/deploy-rust-docs.yaml@7487152d2cb9a39ed5018a726697b01af3a28fb6
+    secrets: inherit 
+    permissions:
+      contents: write
+      id-token: write
+      pages: write

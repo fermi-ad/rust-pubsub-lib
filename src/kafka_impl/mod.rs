@@ -17,7 +17,7 @@ use tokio::sync::broadcast::{self, Receiver, Sender};
 use tokio_stream::wrappers::BroadcastStream;
 use tracing::error;
 
-/// Implementation of the Publisher trait for Kafka connections.
+/// Implementation of the [`Publisher`] trait for Kafka connections.
 pub struct KafkaPublisher {
     producer: Producer,
     topic: String,
@@ -55,7 +55,7 @@ impl fmt::Debug for KafkaPublisher {
     }
 }
 
-/// Implementation of the Snapshot trait for Kafka connections.
+/// Implementation of the [`Snapshot`] trait for Kafka connections.
 #[derive(Debug)]
 pub struct KafkaSnapshot;
 impl Snapshot for KafkaSnapshot {
@@ -83,10 +83,10 @@ impl Snapshot for KafkaSnapshot {
     }
 }
 
-/// Implementation of the Subscriber trait for Kafka connections.
+/// Implementation of the [`Subscriber`] trait for Kafka connections.
 #[derive(Debug)]
 pub struct KafkaSubscriber {
-    /// Keeps the channel open while the subscriber waits for clients to ask for a stream.
+    // Keeps the channel open while the subscriber waits for clients to ask for a stream.
     _channel_lock: Receiver<Message>,
     sender: Arc<Sender<Message>>,
 }

@@ -296,7 +296,7 @@ dependencies = [
 
 [[package]]
 name = "rust-pubsub-lib"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "kafka",
  "rust-env-var-lib",
