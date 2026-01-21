@@ -53,11 +53,11 @@ impl Publisher for KafkaPublisher {
 
     fn publish(&mut self, message: Message) -> Result<(), PubSubError> {
         self.check_connection();
-        if let Some(producer) = &mut self.producer {
-            if let Err(err) = producer.send(&into_record(message, &self.topic)) {
-                handle(&err);
-                self.producer = None;
-            }
+        if let Some(producer) = &mut self.producer
+            && let Err(err) = producer.send(&into_record(message, &self.topic))
+        {
+            handle(&err);
+            self.producer = None;
         }
 
         match self.producer {
@@ -86,7 +86,8 @@ impl Snapshot for KafkaSnapshot {
             let mut cur_size: usize = 0;
             loop {
                 match do_poll(consumer, |msg: Message| {
-                    Ok::<(), PubSubError>(data.push(msg))
+                    data.push(msg);
+                    Ok::<(), PubSubError>(())
                 }) {
                     Ok(_) => {
                         if cur_size < data.len() {
