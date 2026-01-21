@@ -34,11 +34,12 @@ impl Message {
 /// A trait for sending [`Message`]s to a configured topic.
 pub trait Publisher: Debug {
     /// Configures a [`Publisher`] for the provided host and topic.
-    fn new(host: String, topic: String) -> Result<Self, PubSubError>
+    fn new(host: String, topic: String) -> Self
     where
         Self: Sized;
 
-    /// Sends the provided [`Message`] to the configured topic.
+    /// Sends the provided [`Message`] to the configured topic. If a call to this
+    /// method fails, the Publisher will attempt to reconnect on the next call.
     fn publish(&mut self, message: Message) -> Result<(), PubSubError>;
 }
 
@@ -56,11 +57,12 @@ pub trait Subscriber: Debug {
     /// Generates a new [`Subscriber`] for the provided host and topic.
     /// A new thread will be started and run in the background to poll for
     /// [`Message`]s. The thread will terminate when this subscriber is dropped.
-    fn new(host: String, topic: String) -> Result<Self, PubSubError>
+    fn new(host: String, topic: String) -> Self
     where
         Self: Sized;
 
-    /// Streams [`Message`]s that appear on the subscribed topic.
+    /// Streams [`Message`]s that appear on the subscribed topic. If an interruption occurs, the Subscriber will
+    /// attempt to reconnect on its own.
     fn get_stream(&self) -> BroadcastStream<Message>;
 }
 
