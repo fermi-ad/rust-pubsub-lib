@@ -1,6 +1,6 @@
 use crate::{Message, PubSubError, Publisher, Snapshot, Subscriber};
 
-use kafka::{
+use kafkang::{
     client::{FetchOffset, GroupOffsetStorage, RequiredAcks},
     consumer::Consumer,
     producer::{Producer, Record},
@@ -204,7 +204,7 @@ fn do_poll<E: Error + 'static>(
             let value = String::from_utf8(msg.value.to_vec())?;
             append_msg(Message { key, value })?;
         }
-        consumer.consume_messageset(set)?;
+        consumer.consume_messageset(&set)?;
     }
     if consumer.group().is_empty() {
         Ok(())
