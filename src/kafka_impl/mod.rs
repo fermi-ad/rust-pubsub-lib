@@ -236,7 +236,7 @@ fn get_consumer(host: String, topic: String, group: Option<String>) -> Option<Ba
     let group_name = group.unwrap_or_default();
     get_connection(move || {
         let mut consumer: Option<BaseConsumer> = ClientConfig::new()
-            .set("bootstrap.servers", &host.clone())
+            .set("bootstrap.servers", host.clone())
             .set("group.id", &group_name)
             .set("enable.auto.commit", "true")
             .create()
