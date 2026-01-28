@@ -1,9 +1,9 @@
 use crate::{Message, PubSubError, Publisher, Snapshot, Subscriber};
 
-use kafkang::{
-    client::{FetchOffset, GroupOffsetStorage, RequiredAcks},
-    consumer::Consumer,
-    producer::{Producer, Record},
+use rdkafka::{
+    ClientConfig, Message as RdMessage,
+    consumer::{BaseConsumer, Consumer},
+    producer::{BaseProducer, BaseRecord},
 };
 use rust_env_var_lib::env_var;
 use std::{
@@ -24,7 +24,7 @@ use uuid::Uuid;
 /// Implementation of the [`Publisher`] trait for Kafka connections.
 pub struct KafkaPublisher {
     host: String,
-    producer: Option<Producer>,
+    producer: Option<BaseProducer>,
     topic: String,
 }
 impl KafkaPublisher {
@@ -32,9 +32,8 @@ impl KafkaPublisher {
         if self.producer.is_none() {
             let host_clone = self.host.clone();
             self.producer = get_connection(move || {
-                Producer::from_hosts(vec![host_clone.clone()])
-                    .with_ack_timeout(Duration::from_secs(1))
-                    .with_required_acks(RequiredAcks::One)
+                ClientConfig::new()
+                    .set("bootstrap.servers", &host_clone)
                     .create()
                     .inspect_err(handle)
                     .ok()
@@ -54,7 +53,11 @@ impl Publisher for KafkaPublisher {
     fn publish(&mut self, message: Message) -> Result<(), PubSubError> {
         self.check_connection();
         if let Some(producer) = &mut self.producer
-            && let Err(err) = producer.send(&into_record(message, &self.topic))
+            && let Err((err, _)) = producer.send(
+                BaseRecord::to(&self.topic)
+                    .key(&message.key.unwrap_or_default())
+                    .payload(&message.value),
+            )
         {
             handle(&err);
             self.producer = None;
@@ -138,7 +141,7 @@ impl Subscriber for KafkaSubscriber {
 }
 
 struct MessageJob {
-    consumer: Option<Consumer>,
+    consumer: Option<BaseConsumer>,
     host: String,
     sender: Arc<Sender<Message>>,
     topic: String,
@@ -194,23 +197,21 @@ impl MessageJob {
 }
 
 fn do_poll<E: Error + 'static>(
-    consumer: &mut Consumer,
+    consumer: &BaseConsumer,
     mut append_msg: impl FnMut(Message) -> Result<(), E>,
 ) -> Result<(), Box<dyn Error>> {
-    let message_sets = consumer.poll()?;
-    for set in message_sets.iter() {
-        for msg in set.messages() {
-            let key = String::from_utf8(msg.key.to_vec()).inspect_err(handle).ok();
-            let value = String::from_utf8(msg.value.to_vec())?;
-            append_msg(Message { key, value })?;
-        }
-        consumer.consume_messageset(&set)?;
+    if let Some(message_result) = consumer.poll(Duration::from_millis(100)) {
+        let message = message_result?;
+        let key = message
+            .key()
+            .map(|v| String::from_utf8_lossy(v).into_owned());
+        let value = String::from_utf8_lossy(message.payload().ok_or(PubSubError {
+            message: "No body in message",
+        })?)
+        .into_owned();
+        append_msg(Message { key, value })?;
     }
-    if consumer.group().is_empty() {
-        Ok(())
-    } else {
-        Ok(consumer.commit_consumed()?)
-    }
+    Ok(())
 }
 
 const KAFKA_CONN_SECS: &str = "KAFKA_CONNECTION_SECONDS";
@@ -233,27 +234,29 @@ fn get_connection<T: Send + 'static>(
     }
 }
 
-fn get_consumer(host: String, topic: String, group: Option<String>) -> Option<Consumer> {
+fn get_consumer(host: String, topic: String, group: Option<String>) -> Option<BaseConsumer> {
     let group_name = group.unwrap_or_default();
     get_connection(move || {
-        Consumer::from_hosts(vec![host.clone()])
-            .with_topic(topic.clone())
-            .with_group(group_name.clone())
-            .with_fallback_offset(FetchOffset::Earliest)
-            .with_offset_storage(Some(GroupOffsetStorage::Kafka))
+        let mut consumer: Option<BaseConsumer> = ClientConfig::new()
+            .set("bootstrap.servers", host.clone())
+            .set("group.id", &group_name)
+            .set("enable.auto.commit", "true")
             .create()
             .inspect_err(handle)
-            .ok()
+            .ok();
+        if let Some(cons) = consumer {
+            consumer = cons
+                .subscribe(&[&topic.clone()])
+                .inspect_err(handle)
+                .ok()
+                .map(|_| cons);
+        }
+        consumer
     })
 }
 
 fn handle<E: Error + 'static>(err: &E) {
     error!("{}", err)
-}
-
-fn into_record(msg: Message, topic: &str) -> Record<'_, Vec<u8>, Vec<u8>> {
-    let rec_key = msg.key.map_or_else(Vec::new, String::into_bytes);
-    Record::from_key_value(topic, rec_key, msg.value.into_bytes())
 }
 
 #[cfg(test)]
@@ -284,17 +287,5 @@ mod tests {
         let result = KafkaSnapshot::get(String::from("myHost"), String::from("my_topic"));
         let err = result.expect_err("Expected the connection to fail, but it succeeded");
         assert_eq!(super::super::CANNED_ERR_MESSAGE, format!("{}", err));
-    }
-
-    #[test]
-    fn message_into_record() {
-        let key = Some(String::from("some key"));
-        let val = String::from("some text");
-        let message = Message::new(key.clone(), val.clone());
-        let topic = "my topic";
-        let output = into_record(message, topic);
-        assert_eq!(output.topic, topic);
-        assert_eq!(output.key, key.unwrap().into_bytes());
-        assert_eq!(output.value, val.into_bytes());
     }
 }

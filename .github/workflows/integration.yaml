@@ -10,10 +10,11 @@ on:
 
 jobs:
   run-tests-and-coverage:
-    uses: fermi-ad/.github/.github/workflows/rust-integration.yaml@b99946ba8722aeb25ac95245fa01862054748f92
+    uses: fermi-ad/.github/.github/workflows/rust-integration.yaml@e0c90cb1aa154991276dbdd6a4eccfd676b5208b
     secrets: inherit
     permissions:
       contents: write
       pull-requests: write
     with:
       references-internal-git-repo: true
+      static-dependencies: 'libcurl4-openssl-dev librdkafka-dev libsasl2-dev'
