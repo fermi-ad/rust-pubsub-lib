@@ -205,7 +205,7 @@ fn do_poll<E: Error + 'static>(
         let key = message
             .key()
             .map(|v| String::from_utf8_lossy(v).into_owned());
-        let value = String::from_utf8_lossy(message.payload().ok_or_else(|| PubSubError {
+        let value = String::from_utf8_lossy(message.payload().ok_or(PubSubError {
             message: "No body in message",
         })?)
         .into_owned();
