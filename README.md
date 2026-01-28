@@ -8,6 +8,17 @@ The primary abstractions provided by this library are the `Publisher`, `Snapshot
 For this lib to operate successfully, the following environment variables must be set:
 - `KAFKA_CONNECTION_SECONDS` -> At time of writing, Kafka is the message broker/pub-sub service of choice. This variable specifies the number of seconds to wait for a connection to Kafka.
 
+## Development
+
+The following packages must be present on the host machine when building this library:
+- `cmake`
+- `libcurl4-openssl-dev`
+- `librdkafka-dev`
+- `libsasl2-dev`
+- `zlib`
+
+The configured Dev Container in this repository has all the necessary tools to build without additional installation.
+
 ## Docs
 
 The Rust documentation and a getting-started guide can be found [here](https://doc.rust-lang.org/book/title-page.html).
