@@ -9,10 +9,7 @@ use rust_env_var_lib::env_var;
 use std::{
     error::Error,
     fmt,
-    sync::{
-        Arc,
-        mpsc::{self, SendError},
-    },
+    sync::mpsc::{self, SendError},
     thread,
     time::Duration,
 };
@@ -110,21 +107,19 @@ impl Snapshot for KafkaSnapshot {
 pub struct KafkaSubscriber {
     // Keeps the channel open while the subscriber waits for clients to ask for a stream.
     _channel_lock: Receiver<Message>,
-    sender: Arc<Sender<Message>>,
+    sender: Sender<Message>,
 }
 impl Subscriber for KafkaSubscriber {
     fn new(host: String, topic: String) -> Self {
         let (sender, _channel_lock) = broadcast::channel::<Message>(20);
-        let thread_sender = Arc::new(sender);
-        let instance_sender = Arc::clone(&thread_sender);
-        let mut message_job = MessageJob::from(host, topic, thread_sender);
+        let mut message_job = MessageJob::from(host, topic, sender.clone());
         let _task_handle = thread::spawn(move || {
             message_job.run();
         });
 
         Self {
             _channel_lock,
-            sender: instance_sender,
+            sender,
         }
     }
 
@@ -136,12 +131,12 @@ impl Subscriber for KafkaSubscriber {
 struct MessageJob {
     consumer: Option<BaseConsumer>,
     host: String,
-    sender: Arc<Sender<Message>>,
+    sender: Sender<Message>,
     topic: String,
     uuid: Uuid,
 }
 impl MessageJob {
-    fn from(host: String, topic: String, sender: Arc<Sender<Message>>) -> Self {
+    fn from(host: String, topic: String, sender: Sender<Message>) -> Self {
         let uuid = Uuid::new_v4();
         let consumer = get_consumer(host.clone(), topic.clone(), Some(uuid.to_string()));
         Self {
