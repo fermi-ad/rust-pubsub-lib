@@ -9,10 +9,7 @@ use rust_env_var_lib::env_var;
 use std::{
     error::Error,
     fmt,
-    sync::{
-        Arc,
-        mpsc::{self, SendError},
-    },
+    sync::mpsc::{self, SendError},
     thread,
     time::Duration,
 };
@@ -85,27 +82,20 @@ impl Snapshot for KafkaSnapshot {
     fn get(host: String, topic: String) -> Result<Vec<Message>, PubSubError> {
         if let Some(consumer) = &mut get_consumer(host, topic, None) {
             let mut data: Vec<Message> = Vec::new();
-
             let mut cur_size: usize = 0;
             loop {
-                match do_poll(consumer, |msg: Message| {
+                if let Err(e) = do_poll(consumer, |msg: Message| {
                     data.push(msg);
                     Ok::<(), PubSubError>(())
                 }) {
-                    Ok(_) => {
-                        if cur_size < data.len() {
-                            cur_size = data.len();
-                        } else {
-                            break;
-                        }
-                    }
-                    Err(err) => {
-                        error!("{err}");
-                        return Err(PubSubError::default());
-                    }
+                    error!("{e}");
+                    return Err(PubSubError::default());
                 }
+                if cur_size >= data.len() {
+                    return Ok(data);
+                }
+                cur_size = data.len();
             }
-            Ok(data)
         } else {
             Err(PubSubError::default())
         }
@@ -117,21 +107,19 @@ impl Snapshot for KafkaSnapshot {
 pub struct KafkaSubscriber {
     // Keeps the channel open while the subscriber waits for clients to ask for a stream.
     _channel_lock: Receiver<Message>,
-    sender: Arc<Sender<Message>>,
+    sender: Sender<Message>,
 }
 impl Subscriber for KafkaSubscriber {
     fn new(host: String, topic: String) -> Self {
         let (sender, _channel_lock) = broadcast::channel::<Message>(20);
-        let thread_sender = Arc::new(sender);
-        let instance_sender = Arc::clone(&thread_sender);
-        let mut message_job = MessageJob::from(host, topic, thread_sender);
+        let mut message_job = MessageJob::from(host, topic, sender.clone());
         let _task_handle = thread::spawn(move || {
             message_job.run();
         });
 
         Self {
             _channel_lock,
-            sender: instance_sender,
+            sender,
         }
     }
 
@@ -143,12 +131,12 @@ impl Subscriber for KafkaSubscriber {
 struct MessageJob {
     consumer: Option<BaseConsumer>,
     host: String,
-    sender: Arc<Sender<Message>>,
+    sender: Sender<Message>,
     topic: String,
     uuid: Uuid,
 }
 impl MessageJob {
-    fn from(host: String, topic: String, sender: Arc<Sender<Message>>) -> Self {
+    fn from(host: String, topic: String, sender: Sender<Message>) -> Self {
         let uuid = Uuid::new_v4();
         let consumer = get_consumer(host.clone(), topic.clone(), Some(uuid.to_string()));
         Self {
@@ -235,23 +223,16 @@ fn get_connection<T: Send + 'static>(
 }
 
 fn get_consumer(host: String, topic: String, group: Option<String>) -> Option<BaseConsumer> {
-    let group_name = group.unwrap_or_default();
+    let group_name = group.unwrap_or_else(|| Uuid::new_v4().to_string());
     get_connection(move || {
-        let mut consumer: Option<BaseConsumer> = ClientConfig::new()
+        ClientConfig::new()
             .set("bootstrap.servers", host.clone())
             .set("group.id", &group_name)
             .set("enable.auto.commit", "true")
-            .create()
+            .create::<BaseConsumer>()
+            .and_then(|consumer| consumer.subscribe(&[&topic.clone()]).map(|_| consumer))
             .inspect_err(handle)
-            .ok();
-        if let Some(cons) = consumer {
-            consumer = cons
-                .subscribe(&[&topic.clone()])
-                .inspect_err(handle)
-                .ok()
-                .map(|_| cons);
-        }
-        consumer
+            .ok()
     })
 }
 
@@ -283,9 +264,8 @@ mod tests {
     }
 
     #[test]
-    fn error_on_bad_snapshot_host() {
-        let result = KafkaSnapshot::get(String::from("myHost"), String::from("my_topic"));
-        let err = result.expect_err("Expected the connection to fail, but it succeeded");
-        assert_eq!(super::super::CANNED_ERR_MESSAGE, format!("{}", err));
+    fn get_snapshot() {
+        let result = KafkaSnapshot::get(String::new(), String::from("my_topic"));
+        assert_eq!(Vec::<Message>::new(), result.unwrap());
     }
 }

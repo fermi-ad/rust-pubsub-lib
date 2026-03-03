@@ -14,7 +14,7 @@ use tokio_stream::wrappers::BroadcastStream;
 ///
 /// Instances may be created with the [`new`](Message::new) method (specifying both key and value)
 /// or the [`from_value`](Message::from_value) method (specifying only the value).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Message {
     pub key: Option<String>,
     pub value: String,
