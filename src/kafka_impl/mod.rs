@@ -223,12 +223,18 @@ fn get_connection<T: Send + 'static>(
 }
 
 fn get_consumer(host: String, topic: String, group: Option<String>) -> Option<BaseConsumer> {
+    let topic_offset_start = if group.is_none() {
+        "earliest"
+    } else {
+        "latest"
+    };
     let group_name = group.unwrap_or_else(|| Uuid::new_v4().to_string());
     get_connection(move || {
         ClientConfig::new()
             .set("bootstrap.servers", host.clone())
             .set("group.id", &group_name)
             .set("enable.auto.commit", "true")
+            .set("auto.offset.reset", topic_offset_start)
             .create::<BaseConsumer>()
             .and_then(|consumer| consumer.subscribe(&[&topic.clone()]).map(|_| consumer))
             .inspect_err(handle)
