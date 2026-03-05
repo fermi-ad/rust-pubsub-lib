@@ -110,6 +110,15 @@ mod tests {
     fn pubsub_error_display() {
         let err = PubSubError::default();
         assert_eq!(CANNED_ERR_MESSAGE, format!("{}", err));
+
+        let err = PubSubError {
+            message: "test".to_string(),
+            cause: Some(Box::new(PubSubError::default())),
+        };
+        assert_eq!(
+            "test\n Cause: ".to_owned() + CANNED_ERR_MESSAGE,
+            format!("{}", err)
+        );
     }
 
     #[test]
