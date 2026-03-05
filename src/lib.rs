@@ -7,7 +7,7 @@ pub mod kafka_impl;
 
 use std::{
     error::Error,
-    fmt::{self, Debug},
+    fmt::{Debug, Display, Formatter, Result as FmtResult},
 };
 use tokio_stream::Stream;
 
@@ -90,8 +90,8 @@ impl Default for PubSubError {
         }
     }
 }
-impl fmt::Display for PubSubError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for PubSubError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         let cause_message = if let Some(err) = &self.cause {
             format!("\n Cause: {err}")
         } else {
