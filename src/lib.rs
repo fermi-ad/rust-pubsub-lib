@@ -3,7 +3,6 @@
 //! This library enhances the testability of code that is part of a pub/sub architecture, and makes
 //! calls to the pub/sub service easier to set up and manage.
 
-/// Contains implementations of the traits in this library, configured for interactions with a Kafka instance.
 pub mod kafka_impl;
 
 use std::{
@@ -28,7 +27,7 @@ impl Message {
         Self { key, value }
     }
 
-    /// Creates a new [`Message`] with the provided value and no key.
+    /// Creates a new [`Message`] with the provided value _without_ a key.
     pub fn from_value(value: String) -> Self {
         Self { key: None, value }
     }

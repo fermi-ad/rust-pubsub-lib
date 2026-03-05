@@ -1,3 +1,7 @@
+//! Kafka Implementations Module
+//!
+//! Contains implementations of the public traits in this library, configured for interactions with a Kafka instance.
+
 use crate::{Message, PubSubError, Publisher, Snapshot, Subscriber};
 use rdkafka::{
     ClientConfig, Message as RdMessage,
@@ -10,7 +14,7 @@ use rdkafka::{
 use rust_env_var_lib::env_var;
 use std::{
     collections::HashMap,
-    fmt::{self, Debug},
+    fmt::{Debug, Formatter, Result as FmtResult},
     time::Duration,
 };
 use tokio_stream::{Stream, StreamExt};
@@ -68,8 +72,8 @@ impl Publisher for KafkaPublisher {
         }
     }
 }
-impl fmt::Debug for KafkaPublisher {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Debug for KafkaPublisher {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         f.debug_struct("Publisher")
             .field("host", &self.host)
             .field("topic", &self.topic)
@@ -194,7 +198,7 @@ impl Subscriber for KafkaSubscriber {
     }
 }
 impl Debug for KafkaSubscriber {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         let consumer_text = if self.consumer.is_none() {
             "None".to_string()
         } else {
