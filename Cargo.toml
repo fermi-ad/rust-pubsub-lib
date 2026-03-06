@@ -8,7 +8,7 @@ async-trait = "0.1.89"
 rdkafka = { version = "0.39.0", features = ["cmake-build", "gssapi", "tracing"] }
 rust-env-var-lib = { git = "https://github.com/fermi-ad/rust-env-var-lib.git", tag = "v1.1.0" }
 tokio-stream = { version = "0.1.18", features = ["sync"] }
-uuid = { version = "1.21.0", features = ["v4"] }
+uuid = { version = "1.22.0", features = ["v4"] }
 
 [dev-dependencies]
 tokio = { version = "1.50.0", features = ["macros", "rt-multi-thread"] }
