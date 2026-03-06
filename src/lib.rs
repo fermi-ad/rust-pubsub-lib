@@ -3,11 +3,13 @@
 //! This library enhances the testability of code that is part of a pub/sub architecture, and makes
 //! calls to the pub/sub service easier to set up and manage.
 
-/// Contains implementations of the traits in this library, configured for interactions with a Kafka instance.
 pub mod kafka_impl;
 
-use std::fmt::{self, Debug};
-use tokio_stream::wrappers::BroadcastStream;
+use std::{
+    error::Error,
+    fmt::{Debug, Display, Formatter, Result as FmtResult},
+};
+use tokio_stream::Stream;
 
 /// A message from the pub-sub service.
 /// Contains a key (optional) and a value.
@@ -25,13 +27,14 @@ impl Message {
         Self { key, value }
     }
 
-    /// Creates a new [`Message`] with the provided value and no key.
+    /// Creates a new [`Message`] with the provided value _without_ a key.
     pub fn from_value(value: String) -> Self {
         Self { key: None, value }
     }
 }
 
 /// A trait for sending [`Message`]s to a configured topic.
+#[async_trait::async_trait]
 pub trait Publisher: Debug {
     /// Configures a [`Publisher`] for the provided host and topic.
     fn new(host: String, topic: String) -> Self
@@ -40,16 +43,17 @@ pub trait Publisher: Debug {
 
     /// Sends the provided [`Message`] to the configured topic. If a call to this
     /// method fails, the Publisher will attempt to reconnect on the next call.
-    fn publish(&mut self, message: Message) -> Result<(), PubSubError>;
+    async fn publish(&mut self, message: Message) -> Result<(), PubSubError>;
 }
 
 /// A trait for retrieving the instantaneous set of [`Message`]s on a topic.
+#[async_trait::async_trait]
 pub trait Snapshot {
     /// Retrieves a snapshot of a message topic.
     /// This function connects to the message broker,
     /// loads all [`Message`]s currently on the specified topic, and returns them
     /// to the caller.
-    fn get(host: String, topic: String) -> Result<Vec<Message>, PubSubError>;
+    async fn get(host: String, topic: String) -> Result<Vec<Message>, PubSubError>;
 }
 
 /// A trait for subscribing to a message topic. Returns the values as a stream of [`Message`]s for clients to handle.
@@ -63,28 +67,37 @@ pub trait Subscriber: Debug {
 
     /// Streams [`Message`]s that appear on the subscribed topic. If an interruption occurs, the Subscriber will
     /// attempt to reconnect on its own.
-    fn get_stream(&self) -> BroadcastStream<Message>;
+    fn get_stream(
+        &mut self,
+    ) -> Result<impl Stream<Item = Result<Message, PubSubError>>, PubSubError>;
 }
 
-const CANNED_ERR_MESSAGE: &str = "An error occurred while attempting to connect to the message broker. See server logs for details.";
+const CANNED_ERR_MESSAGE: &str = "The PubSub library encountered an error.";
 
 /// An implementation of [`std::error::Error`] to return when pub/sub operations do not succeed.
-/// This will always contain a canned error message, with the true error having been logged already. This ensures error
-/// details will never accidentally be sent back to clients, and the relevant failure details are preserved for analysis.
+/// This will always contain a canned error message, with the underlying error recorded if possible.
+/// Consumers of this library should be careful not to expose sensitive data to users.
 #[derive(Debug)]
 pub struct PubSubError {
-    message: &'static str,
+    message: String,
+    cause: Option<Box<dyn Error>>,
 }
 impl Default for PubSubError {
     fn default() -> Self {
         Self {
-            message: CANNED_ERR_MESSAGE,
+            message: CANNED_ERR_MESSAGE.to_string(),
+            cause: None,
         }
     }
 }
-impl fmt::Display for PubSubError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.message)
+impl Display for PubSubError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        let cause_message = if let Some(err) = &self.cause {
+            format!("\n Cause: {err}")
+        } else {
+            String::new()
+        };
+        write!(f, "{}{}", self.message, cause_message)
     }
 }
 impl std::error::Error for PubSubError {}
@@ -97,6 +110,15 @@ mod tests {
     fn pubsub_error_display() {
         let err = PubSubError::default();
         assert_eq!(CANNED_ERR_MESSAGE, format!("{}", err));
+
+        let err = PubSubError {
+            message: "test".to_string(),
+            cause: Some(Box::new(PubSubError::default())),
+        };
+        assert_eq!(
+            "test\n Cause: ".to_owned() + CANNED_ERR_MESSAGE,
+            format!("{}", err)
+        );
     }
 
     #[test]
