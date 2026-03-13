@@ -3,13 +3,16 @@
 //! This library enhances the testability of code that is part of a pub/sub architecture, and makes
 //! calls to the pub/sub service easier to set up and manage.
 
-pub mod kafka_impl;
-
 use std::{
     error::Error,
     fmt::{Debug, Display, Formatter, Result as FmtResult},
 };
 use tokio_stream::Stream;
+
+pub mod kafka_impl;
+
+#[cfg(test)]
+mod tests;
 
 /// A message from the pub-sub service.
 /// Contains a key (optional) and a value.
@@ -43,7 +46,7 @@ pub trait Publisher: Debug {
 
     /// Sends the provided [`Message`] to the configured topic. If a call to this
     /// method fails, the Publisher will attempt to reconnect on the next call.
-    async fn publish(&mut self, message: Message) -> Result<(), PubSubError>;
+    async fn publish(&self, message: Message) -> Result<(), PubSubError>;
 }
 
 /// A trait for retrieving the instantaneous set of [`Message`]s on a topic.
@@ -69,18 +72,18 @@ pub trait Subscriber: Debug {
     /// attempt to reconnect on its own.
     fn get_stream(
         &mut self,
-    ) -> Result<impl Stream<Item = Result<Message, PubSubError>>, PubSubError>;
+    ) -> Result<impl Stream<Item = Result<Message, PubSubError>> + Unpin + Send, PubSubError>;
 }
 
 const CANNED_ERR_MESSAGE: &str = "The PubSub library encountered an error.";
 
-/// An implementation of [`std::error::Error`] to return when pub/sub operations do not succeed.
+/// An implementation of [`Error`] to return when pub/sub operations do not succeed.
 /// This will always contain a canned error message, with the underlying error recorded if possible.
 /// Consumers of this library should be careful not to expose sensitive data to users.
 #[derive(Debug)]
 pub struct PubSubError {
     message: String,
-    cause: Option<Box<dyn Error>>,
+    cause: Option<Box<dyn Error + Send>>,
 }
 impl Default for PubSubError {
     fn default() -> Self {
@@ -100,41 +103,4 @@ impl Display for PubSubError {
         write!(f, "{}{}", self.message, cause_message)
     }
 }
-impl std::error::Error for PubSubError {}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn pubsub_error_display() {
-        let err = PubSubError::default();
-        assert_eq!(CANNED_ERR_MESSAGE, format!("{}", err));
-
-        let err = PubSubError {
-            message: "test".to_string(),
-            cause: Some(Box::new(PubSubError::default())),
-        };
-        assert_eq!(
-            "test\n Cause: ".to_owned() + CANNED_ERR_MESSAGE,
-            format!("{}", err)
-        );
-    }
-
-    #[test]
-    fn message_from_value() {
-        let val = String::from("some text");
-        let output = Message::from_value(val.clone());
-        assert_eq!(output.key, None);
-        assert_eq!(output.value, val);
-    }
-
-    #[test]
-    fn message_from_key_value() {
-        let key = Some(String::from("some key"));
-        let val = String::from("some text");
-        let output = Message::new(key.clone(), val.clone());
-        assert_eq!(output.key, key);
-        assert_eq!(output.value, val);
-    }
-}
+impl Error for PubSubError {}

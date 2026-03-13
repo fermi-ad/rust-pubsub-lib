@@ -15,10 +15,23 @@ use rust_env_var_lib::env_var;
 use std::{
     collections::HashMap,
     fmt::{Debug, Formatter, Result as FmtResult},
+    sync::LazyLock,
     time::Duration,
 };
+use tokio::sync::RwLock;
 use tokio_stream::{Stream, StreamExt};
 use uuid::Uuid;
+
+#[cfg(any(feature = "testing-utils", test))]
+pub mod testing_utils;
+
+#[cfg(test)]
+mod tests;
+
+/// [`FutureProducer`] is intended to be a one-per-host construct, shared by all parts of the application that need to produce on that host.
+/// As such, we build a static map of the producers to be shared by all instances of [`KafkaPublisher`] that get requested for the same host.  
+static PRODUCER_MAP: LazyLock<RwLock<HashMap<String, FutureProducer>>> =
+    LazyLock::new(RwLock::default);
 
 impl From<KafkaError> for PubSubError {
     fn from(value: KafkaError) -> Self {
@@ -32,43 +45,48 @@ impl From<KafkaError> for PubSubError {
 /// Implementation of the [`Publisher`] trait for Kafka connections.
 pub struct KafkaPublisher {
     host: String,
-    producer: Option<FutureProducer>,
     topic: String,
 }
 impl KafkaPublisher {
-    fn check_connection(&mut self) -> Result<(), PubSubError> {
-        if self.producer.is_none() {
-            let producer = ClientConfig::new()
-                .set("bootstrap.servers", &self.host)
-                .create()?;
-            self.producer = Some(producer);
+    async fn get_connection(&self) -> Result<FutureProducer, PubSubError> {
+        let naive_read = PRODUCER_MAP.read().await.get(&self.host).cloned();
+        match naive_read {
+            Some(producer) => Ok(producer),
+            None => {
+                let mut lock = PRODUCER_MAP.write().await;
+                match lock.get(&self.host).cloned() {
+                    Some(producer) => Ok(producer),
+                    None => {
+                        let default = ClientConfig::new()
+                            .set("bootstrap.servers", &self.host)
+                            .create()?;
+                        let producer = lock
+                            .entry(self.host.clone())
+                            .insert_entry(default)
+                            .get()
+                            .clone();
+                        Ok(producer)
+                    }
+                }
+            }
         }
-        Ok(())
     }
 }
 #[async_trait::async_trait]
 impl Publisher for KafkaPublisher {
     fn new(host: String, topic: String) -> Self {
-        Self {
-            host,
-            producer: None,
-            topic,
-        }
+        Self { host, topic }
     }
 
-    async fn publish(&mut self, message: Message) -> Result<(), PubSubError> {
-        self.check_connection()?;
-        let producer = self.producer.as_ref().unwrap();
+    async fn publish(&self, message: Message) -> Result<(), PubSubError> {
+        let producer = self.get_connection().await?;
         let mut record = FutureRecord::to(&self.topic).payload(&message.value);
         if let Some(key) = &message.key {
             record = record.key(key);
         }
         match producer.send(record, get_kafka_timeout_val()).await {
             Ok(_) => Ok(()),
-            Err((err, _)) => {
-                self.producer = None;
-                Err(PubSubError::from(err))
-            }
+            Err((err, _)) => Err(PubSubError::from(err)),
         }
     }
 }
@@ -148,8 +166,15 @@ pub struct KafkaSubscriber {
     uuid: Uuid,
 }
 impl KafkaSubscriber {
+    fn check_connection(&mut self) -> Result<(), PubSubError> {
+        if self.consumer.is_none() {
+            self.configure_consumer()?;
+        }
+        Ok(())
+    }
+
     fn configure_consumer(&mut self) -> Result<(), PubSubError> {
-        #[cfg(not(test))]
+        #[cfg(not(any(feature = "testing-utils", test)))]
         let consumer = ClientConfig::new()
             .set("bootstrap.servers", &self.host)
             .set("group.id", self.uuid.as_hyphenated().to_string())
@@ -157,7 +182,7 @@ impl KafkaSubscriber {
 
         // During testing, the low latency of the mock Kafka cluster means that messages are often produced on the broker before the
         // consumer is registered. Setting the auto offset reset to "earliest" ensures we see all messages during the test.
-        #[cfg(test)]
+        #[cfg(any(feature = "testing-utils", test))]
         let consumer = ClientConfig::new()
             .set("bootstrap.servers", &self.host)
             .set("group.id", self.uuid.as_hyphenated().to_string())
@@ -170,13 +195,6 @@ impl KafkaSubscriber {
 
     fn convert_stream(initial: KafkaResult<BorrowedMessage>) -> Result<Message, PubSubError> {
         convert_to_message(initial?)
-    }
-
-    fn check_connection(&mut self) -> Result<(), PubSubError> {
-        if self.consumer.is_none() {
-            self.configure_consumer()?;
-        }
-        Ok(())
     }
 }
 impl Subscriber for KafkaSubscriber {
@@ -191,10 +209,14 @@ impl Subscriber for KafkaSubscriber {
 
     fn get_stream(
         &mut self,
-    ) -> Result<impl Stream<Item = Result<Message, PubSubError>>, PubSubError> {
+    ) -> Result<impl Stream<Item = Result<Message, PubSubError>> + Unpin + Send, PubSubError> {
         self.check_connection()?;
-        let consumer = self.consumer.as_ref().unwrap();
-        Ok(consumer.stream().map(Self::convert_stream))
+        Ok(self
+            .consumer
+            .as_ref()
+            .unwrap()
+            .stream()
+            .map(Self::convert_stream))
     }
 }
 impl Debug for KafkaSubscriber {
@@ -227,131 +249,4 @@ fn convert_to_message(incoming: BorrowedMessage) -> Result<Message, PubSubError>
 fn get_kafka_timeout_val() -> Duration {
     let secs = env_var::get("KAFKA_CONNECTION_SECONDS").or(1);
     Duration::from_secs(secs)
-}
-
-#[cfg(test)]
-pub mod testing_utils {
-    //! Testing Utilities Module
-    //!
-    //! This module contains useful structures for writing tests against this library.
-
-    use rdkafka::{mocking::MockCluster, producer::DefaultProducerContext};
-
-    /// A set of values for running tests against an instance of [`MockCluster`].
-    pub struct Harness<'a> {
-        /// The comma-delimited list of addresses generated by the [`MockCluster`].
-        host: String,
-
-        /// The instance of [`MockCluster`] to target during testing.
-        mock_cluster: MockCluster<'a, DefaultProducerContext>,
-
-        /// The topic that has been preconfigured on the [`MockCluster`].
-        topic: String,
-    }
-    impl<'a> Harness<'a> {
-        /// Generates an instance of [`Harness`] with a [`MockCluster`] that has been prepopulated with the specified topic.
-        pub fn for_topic(topic: String) -> Self {
-            let cluster = MockCluster::new(3).unwrap();
-            cluster.create_topic(&topic, 3, 1).unwrap();
-
-            Harness {
-                host: cluster.bootstrap_servers(),
-                mock_cluster: cluster,
-                topic,
-            }
-        }
-
-        /// Returns the comma-delimited list of addresses generated by the [`MockCluster`].
-        pub fn host(&self) -> String {
-            self.host.clone()
-        }
-
-        /// Returns a reference to the instance of [`MockCluster`] to target during testing.
-        pub fn mock_cluster(&self) -> &MockCluster<'a, DefaultProducerContext> {
-            &self.mock_cluster
-        }
-
-        /// Returns the topic that has been preconfigured on the [`MockCluster`]..
-        pub fn topic(&self) -> String {
-            self.topic.clone()
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{testing_utils::Harness, *};
-    use tokio_stream::StreamExt;
-
-    #[test]
-    fn format_kafka_publisher() {
-        let host = String::from("host");
-        let topic = String::from("topic");
-        let test_pub = KafkaPublisher::new(host.clone(), topic.clone());
-        assert_eq!(
-            "KafkaPublisher { host: \"host\", topic: \"topic\" }",
-            format!("{test_pub:?}")
-        );
-    }
-
-    #[tokio::test]
-    async fn format_kafka_subscriber() {
-        let harness = Harness::for_topic(String::from("topic"));
-        let topic = harness.topic();
-        let host = harness.host();
-
-        let mut test_sub = KafkaSubscriber::new(host.clone(), topic.clone());
-        assert_eq!(
-            format!(
-                "KafkaSubscriber {{ consumer: \"None\", host: \"{host}\", topic: \"{topic}\", uuid: \"{}\" }}",
-                test_sub.uuid.as_hyphenated()
-            ),
-            format!("{test_sub:?}")
-        );
-
-        let _ = test_sub.get_stream();
-        assert_eq!(
-            format!(
-                "KafkaSubscriber {{ consumer: \"Some(StreamConsumer)\", host: \"{host}\", topic: \"{topic}\", uuid: \"{}\" }}",
-                test_sub.uuid.as_hyphenated()
-            ),
-            format!("{test_sub:?}")
-        );
-    }
-
-    #[test]
-    fn from_kafka_error() {
-        let expected = PubSubError {
-            cause: Some(Box::new(KafkaError::Canceled)),
-            ..Default::default()
-        };
-        let result = PubSubError::from(KafkaError::Canceled);
-        assert_eq!(format!("{expected}"), format!("{result}"));
-    }
-
-    #[tokio::test]
-    async fn kafka_consumer_and_producer() {
-        let test_harness = Harness::for_topic(String::from("test_topic"));
-
-        let mut test_sub = KafkaSubscriber::new(test_harness.host(), test_harness.topic());
-        let mut stream = test_sub.get_stream().unwrap();
-
-        let message = Message::new(None, "testing".to_string());
-        let mut test_pub = KafkaPublisher::new(test_harness.host(), test_harness.topic());
-        test_pub.publish(message.clone()).await.unwrap();
-
-        assert_eq!(message, stream.next().await.unwrap().unwrap());
-    }
-
-    #[tokio::test]
-    async fn kafka_snapshot() {
-        let test_harness = Harness::for_topic(String::from("test_topic"));
-
-        let message = Message::new(None, "testing".to_string());
-        let mut test_pub = KafkaPublisher::new(test_harness.host(), test_harness.topic());
-        test_pub.publish(message.clone()).await.unwrap();
-
-        let result = KafkaSnapshot::get(test_harness.host(), test_harness.topic()).await;
-        assert_eq!(vec![message], result.unwrap());
-    }
 }
