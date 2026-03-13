@@ -7,12 +7,11 @@ on:
 
 jobs:
   deploy-docs:
-    uses: fermi-ad/.github/.github/workflows/deploy-rust-docs.yaml@3e98f98790694d1694d754d1eae183ce745d342d
+    uses: fermi-ad/.github/.github/workflows/deploy-rust-docs.yaml@75e45bfe74331d410a0af9eb1af33fd8d1f1806a
     secrets: inherit 
     permissions:
       contents: write
       id-token: write
       pages: write
     with:
-      references-internal-git-repo: true
       static-dependencies: 'libcurl4-openssl-dev libsasl2-dev'
