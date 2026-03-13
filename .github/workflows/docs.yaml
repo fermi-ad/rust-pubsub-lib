@@ -15,4 +15,4 @@ jobs:
       pages: write
     with:
       references-internal-git-repo: true
-      static-dependencies: 'libcurl4-openssl-dev librdkafka-dev libsasl2-dev'
+      static-dependencies: 'libcurl4-openssl-dev libsasl2-dev'

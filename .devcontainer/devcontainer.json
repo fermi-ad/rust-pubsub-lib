@@ -1,6 +1,6 @@
 {
     "name": "Rust",
-    "image": "adregistry.fnal.gov/dev-containers/rust-kafka:1.93.0",
+    "image": "adregistry.fnal.gov/dev-containers/rust-kafka:1.94.0-debian",
     "customizations": {
         "vscode": {
             "extensions": [
