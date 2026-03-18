@@ -1,0 +1,31 @@
+name: CI-CD
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  run-tests-and-coverage:
+    uses: fermi-ad/.github/.github/workflows/rust-integration.yaml@f5b1570438803675367730e055d4a3e1983be9d1
+    secrets: inherit
+    permissions:
+      contents: write
+      pull-requests: write
+    with:
+      static-dependencies: 'libcurl4-openssl-dev libsasl2-dev'
+      
+  deploy-docs:
+    needs: run-tests-and-coverage
+    if: ${{ github.event_name == 'push' }}
+    uses: fermi-ad/.github/.github/workflows/deploy-rust-docs.yaml@6e7454e04e62819b8b2ac97599cf2f77db3c238c
+    secrets: inherit 
+    permissions:
+      contents: write
+      id-token: write
+      pages: write
+    with:
+      static-dependencies: 'libcurl4-openssl-dev libsasl2-dev'
