@@ -113,14 +113,11 @@ fn poll_redis(
                     for stream in reply.keys {
                         for entry in stream.ids {
                             latest_id = entry.id;
-                            let translation =
-                                redis_map_to_json(entry.map).and_then(|deserialized| {
+                            let message = redis_map_to_json(entry.map)
+                                .and_then(|deserialized| {
                                     to_vec(&json!(deserialized)).map_err(PubSubError::from_debug)
-                                });
-                            let message = match translation {
-                                Ok(bytes) => Ok(ByteMessage::from_value(bytes)),
-                                Err(e) => Err(PubSubError::from_display(e)),
-                            };
+                                })
+                                .map(ByteMessage::from_value);
                             let _ = cloned_sender.send(message);
                         }
                     }
@@ -147,10 +144,8 @@ fn redis_map_to_json(redis: HashMap<String, RedisValue>) -> Result<JSONValue, Pu
         } else if let Some(arr) = redis_val.as_sequence() {
             obj.insert(key, redis_seq_to_json(arr)?);
         } else {
-            match redis::from_redis_value(redis_val) {
-                Ok(val) => obj.insert(key, JSONValue::String(val)),
-                Err(e) => return Err(PubSubError::from_debug(e)),
-            };
+            let val = redis::from_redis_value(redis_val).map_err(PubSubError::from_debug)?;
+            obj.insert(key, JSONValue::String(val));
         }
     }
     Ok(JSONValue::Object(obj))

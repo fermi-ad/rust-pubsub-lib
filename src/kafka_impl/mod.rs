@@ -2,7 +2,7 @@
 //!
 //! Contains implementations of the public traits in this library, configured for interactions with a Kafka instance.
 
-use crate::{Message, PubSubError, Publisher, Snapshot, StringMessage, Subscriber};
+use crate::{Message, PubSubError, Publisher, Snapshot, Subscriber};
 use rdkafka::{
     ClientConfig, Message as RdMessage,
     consumer::{Consumer, StreamConsumer},

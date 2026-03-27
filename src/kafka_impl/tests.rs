@@ -1,7 +1,7 @@
 //! The tests for the Kafka Implementation Module
 
 use super::*;
-use crate::{ByteMessage, kafka_impl::testing_utils::Harness};
+use crate::{ByteMessage, StringMessage, kafka_impl::testing_utils::Harness};
 use tokio_stream::StreamExt;
 
 #[test]
