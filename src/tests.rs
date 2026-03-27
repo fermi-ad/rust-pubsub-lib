@@ -7,12 +7,19 @@ fn pubsub_error_display() {
     let err = PubSubError::default();
     assert_eq!(CANNED_ERR_MESSAGE, format!("{}", err));
 
-    let err = PubSubError {
-        message: "test".to_string(),
-        cause: Some(Box::new(PubSubError::default())),
-    };
+    let err = PubSubError::from_debug(PubSubError::default());
     assert_eq!(
-        "test\n Cause: ".to_owned() + CANNED_ERR_MESSAGE,
+        format!(
+            "{}\n Cause: {:?}",
+            CANNED_ERR_MESSAGE,
+            PubSubError::default()
+        ),
+        format!("{}", err)
+    );
+
+    let err = PubSubError::from_display(PubSubError::default());
+    assert_eq!(
+        format!("{}\n Cause: {}", CANNED_ERR_MESSAGE, PubSubError::default()),
         format!("{}", err)
     );
 }
@@ -20,7 +27,7 @@ fn pubsub_error_display() {
 #[test]
 fn message_from_value() {
     let val = String::from("some text");
-    let output = Message::from_value(val.clone());
+    let output = StringMessage::from_value(val.clone());
     assert_eq!(output.key, None);
     assert_eq!(output.value, val);
 }
@@ -29,7 +36,7 @@ fn message_from_value() {
 fn message_from_key_value() {
     let key = Some(String::from("some key"));
     let val = String::from("some text");
-    let output = Message::new(key.clone(), val.clone());
+    let output = StringMessage::new(key.clone(), val.clone());
     assert_eq!(output.key, key);
     assert_eq!(output.value, val);
 }

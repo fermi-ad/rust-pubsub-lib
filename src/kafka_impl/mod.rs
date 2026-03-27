@@ -2,7 +2,7 @@
 //!
 //! Contains implementations of the public traits in this library, configured for interactions with a Kafka instance.
 
-use crate::{Message, PubSubError, Publisher, Snapshot, Subscriber};
+use crate::{Message, PubSubError, Publisher, Snapshot, StringMessage, Subscriber};
 use rdkafka::{
     ClientConfig, Message as RdMessage,
     consumer::{Consumer, StreamConsumer},
@@ -35,10 +35,7 @@ static PRODUCER_MAP: LazyLock<RwLock<HashMap<String, FutureProducer>>> =
 
 impl From<KafkaError> for PubSubError {
     fn from(value: KafkaError) -> Self {
-        PubSubError {
-            cause: Some(Box::new(value)),
-            ..Default::default()
-        }
+        PubSubError::from_display(value)
     }
 }
 
@@ -78,10 +75,11 @@ impl Publisher for KafkaPublisher {
         Self { host, topic }
     }
 
-    async fn publish(&self, message: Message) -> Result<(), PubSubError> {
+    async fn publish<T, M: Message<T>>(&self, message: M) -> Result<(), PubSubError> {
         let producer = self.get_connection().await?;
-        let mut record = FutureRecord::to(&self.topic).payload(&message.value);
-        if let Some(key) = &message.key {
+        let bytes = message.into_bytes();
+        let mut record = FutureRecord::to(&self.topic).payload(&bytes.value);
+        if let Some(key) = &bytes.key {
             record = record.key(key);
         }
         match producer.send(record, get_kafka_timeout_val()).await {
@@ -140,12 +138,12 @@ impl KafkaSnapshot {
 }
 #[async_trait::async_trait]
 impl Snapshot for KafkaSnapshot {
-    async fn get(host: String, topic: String) -> Result<Vec<Message>, PubSubError> {
+    async fn get<T, M: Message<T>>(host: String, topic: String) -> Result<Vec<M>, PubSubError> {
         let consumer = Self::configure_consumer(&host, &topic)?;
         let mut offsets = Self::determine_max_offsets(&consumer, &topic)?;
 
         let mut stream = consumer.stream();
-        let mut data: Vec<Message> = Vec::new();
+        let mut data: Vec<M> = Vec::new();
         while !offsets.is_empty()
             && let Some(msg_res) = stream.next().await
         {
@@ -193,7 +191,9 @@ impl KafkaSubscriber {
         Ok(())
     }
 
-    fn convert_stream(initial: KafkaResult<BorrowedMessage>) -> Result<Message, PubSubError> {
+    fn convert_stream<T, M: Message<T>>(
+        initial: KafkaResult<BorrowedMessage>,
+    ) -> Result<M, PubSubError> {
         convert_to_message(initial?)
     }
 }
@@ -207,9 +207,9 @@ impl Subscriber for KafkaSubscriber {
         }
     }
 
-    fn get_stream(
+    fn get_stream<T, M: Message<T>>(
         &mut self,
-    ) -> Result<impl Stream<Item = Result<Message, PubSubError>> + Unpin + Send, PubSubError> {
+    ) -> Result<impl Stream<Item = Result<M, PubSubError>> + Unpin + Send, PubSubError> {
         self.check_connection()?;
         Ok(self
             .consumer
@@ -235,15 +235,11 @@ impl Debug for KafkaSubscriber {
     }
 }
 
-fn convert_to_message(incoming: BorrowedMessage) -> Result<Message, PubSubError> {
-    let value_bytes = incoming.payload().ok_or_else(PubSubError::default)?;
-    let value = String::from_utf8_lossy(value_bytes).to_string();
+fn convert_to_message<T, M: Message<T>>(incoming: BorrowedMessage) -> Result<M, PubSubError> {
+    let value = incoming.payload().ok_or_else(PubSubError::default)?;
+    let key = incoming.key();
 
-    let key = incoming
-        .key()
-        .map(|bytes| String::from_utf8_lossy(bytes).to_string());
-
-    Ok(Message { key, value })
+    Ok(M::from_bytes(key, value))
 }
 
 fn get_kafka_timeout_val() -> Duration {

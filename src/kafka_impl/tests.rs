@@ -1,7 +1,7 @@
 //! The tests for the Kafka Implementation Module
 
 use super::*;
-use crate::kafka_impl::testing_utils::Harness;
+use crate::{ByteMessage, kafka_impl::testing_utils::Harness};
 use tokio_stream::StreamExt;
 
 #[test]
@@ -30,7 +30,7 @@ async fn format_kafka_subscriber() {
         format!("{test_sub:?}")
     );
 
-    let _ = test_sub.get_stream();
+    let _ = test_sub.get_stream::<Vec<u8>, ByteMessage>();
     assert_eq!(
         format!(
             "KafkaSubscriber {{ consumer: \"Some(StreamConsumer)\", host: \"{}\", topic: \"{topic}\", uuid: \"{}\" }}",
@@ -43,10 +43,7 @@ async fn format_kafka_subscriber() {
 
 #[test]
 fn from_kafka_error() {
-    let expected = PubSubError {
-        cause: Some(Box::new(KafkaError::Canceled)),
-        ..Default::default()
-    };
+    let expected = PubSubError::from_display(KafkaError::Canceled);
     let result = PubSubError::from(KafkaError::Canceled);
     assert_eq!(format!("{expected}"), format!("{result}"));
 }
@@ -59,7 +56,7 @@ async fn kafka_consumer_and_producer() {
     let mut test_sub = KafkaSubscriber::new(test_harness.host(), topic.clone());
     let mut stream = test_sub.get_stream().unwrap();
 
-    let message = Message::new(None, "testing".to_string());
+    let message = StringMessage::from_value("testing".to_string());
     let test_pub = KafkaPublisher::new(test_harness.host(), topic);
     test_pub.publish(message.clone()).await.unwrap();
 
@@ -71,7 +68,7 @@ async fn kafka_snapshot() {
     let topic = String::from("test_topic");
     let test_harness = Harness::with_topics(vec![topic.clone()]).await;
 
-    let message = Message::new(None, "testing".to_string());
+    let message = StringMessage::new(None, "testing".to_string());
     let test_pub = KafkaPublisher::new(test_harness.host(), topic.clone());
     test_pub.publish(message.clone()).await.unwrap();
 
