@@ -71,7 +71,7 @@ impl Subscriber for RedisSubscriber {
     ) -> Result<impl Stream<Item = Result<M, PubSubError>> + Unpin + Send, PubSubError> {
         Ok(BroadcastStream::new(self.sender.subscribe()).map(|stream| {
             stream
-                .map_err(|e| PubSubError::from_display(e))
+                .map_err(PubSubError::from_display)
                 .and_then(|response| response.map(M::from))
         }))
     }
@@ -85,13 +85,10 @@ impl Debug for RedisSubscriber {
     }
 }
 
-fn poll_redis(
-    host: &str,
-    topic: &str,
-) -> (
-    Sender<Result<ByteMessage, PubSubError>>,
-    Receiver<Result<ByteMessage, PubSubError>>,
-) {
+type MsgSender = Sender<Result<ByteMessage, PubSubError>>;
+type MsgReceiver = Receiver<Result<ByteMessage, PubSubError>>;
+
+fn poll_redis(host: &str, topic: &str) -> (MsgSender, MsgReceiver) {
     let (sender, _channel_lock) = broadcast::channel(10);
     let cloned_host = host.to_owned();
     let cloned_sender = sender.clone();

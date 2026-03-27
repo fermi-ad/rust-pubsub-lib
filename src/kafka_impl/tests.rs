@@ -73,5 +73,5 @@ async fn kafka_snapshot() {
     test_pub.publish(message.clone()).await.unwrap();
 
     let result = KafkaSnapshot::get(test_harness.host(), topic).await;
-    assert!(result.unwrap().iter().any(|item| message == *item));
+    assert!(result.unwrap().contains(&message));
 }

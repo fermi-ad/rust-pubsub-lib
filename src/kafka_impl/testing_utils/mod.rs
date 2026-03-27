@@ -25,15 +25,10 @@ fn run_cluster(host_sender: oneshot::Sender<String>, mut topic_receiver: mpsc::R
     host_sender
         .send(mock_cluster.bootstrap_servers())
         .expect("Could not send the host to the MockKafka instance");
-    loop {
-        match topic_receiver.blocking_recv() {
-            Some(topic) => {
-                let _ = mock_cluster.create_topic(&topic, 3, 1);
-            }
-            // When the tests are done, the `MockKafka` will drop its sender, triggering the receiver to resolve to `None`.
-            // We can therefore exit the loop to gracefully terminate this thread.
-            None => break,
-        }
+
+    // `blocking_recv` will return `None` when all senders are dropped (i.e., when tests are over).
+    while let Some(topic) = topic_receiver.blocking_recv() {
+        let _ = mock_cluster.create_topic(&topic, 3, 1);
     }
 }
 
