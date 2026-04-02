@@ -53,14 +53,15 @@ impl RedisSubscriber {
         }))
     }
 }
+#[async_trait::async_trait]
 impl Subscriber for RedisSubscriber {
     fn new(host: String, topic: String) -> Self {
         RedisSubscriber { host, topic }
     }
 
-    fn get_stream<T, M: Message<T>>(
+    async fn get_stream<T, M: Message<T>>(
         &mut self,
     ) -> Result<impl Stream<Item = Result<M, PubSubError>> + Unpin + Send, PubSubError> {
-        tokio::runtime::Handle::current().block_on(self.get_pubsub_stream())
+        self.get_pubsub_stream().await
     }
 }

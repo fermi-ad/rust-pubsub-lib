@@ -54,6 +54,7 @@ pub struct RedisSubscriber {
     sender: Sender<Result<ByteMessage, PubSubError>>,
     topic: String,
 }
+#[async_trait::async_trait]
 impl Subscriber for RedisSubscriber {
     fn new(host: String, topic: String) -> Self {
         let (sender, _channel_lock) = poll_redis(&host, &topic);
@@ -65,7 +66,7 @@ impl Subscriber for RedisSubscriber {
         }
     }
 
-    fn get_stream<T, M: Message<T>>(
+    async fn get_stream<T, M: Message<T>>(
         &mut self,
     ) -> Result<impl Stream<Item = Result<M, PubSubError>> + Unpin + Send, PubSubError> {
         Ok(BroadcastStream::new(self.sender.subscribe()).map(|stream| {

@@ -159,6 +159,7 @@ pub trait Snapshot {
 }
 
 /// A trait for subscribing to a message topic. Returns the values as a stream of [`Message`]s for clients to handle.
+#[async_trait::async_trait]
 pub trait Subscriber: Debug {
     /// Generates a new [`Subscriber`] for the provided host and topic.
     /// A new thread will be started and run in the background to poll for
@@ -169,7 +170,7 @@ pub trait Subscriber: Debug {
 
     /// Streams [`Message`]s that appear on the subscribed topic. If an interruption occurs, the Subscriber will
     /// attempt to reconnect on its own.
-    fn get_stream<T, M: Message<T>>(
+    async fn get_stream<T, M: Message<T>>(
         &mut self,
     ) -> Result<impl Stream<Item = Result<M, PubSubError>> + Unpin + Send, PubSubError>;
 }
