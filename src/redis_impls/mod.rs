@@ -2,10 +2,10 @@
 //!
 //! Houses the implementations of the public traits in this library for different "flavors" of Redis.
 
-use std::{collections::HashMap, sync::LazyLock};
-
 use crate::{ByteMessage, Message, PubSubError};
 use redis::{Client, FromRedisValue, ParsingError, RedisError, Value, aio::ConnectionManager};
+use serde_json::{Map, Value as JsonValue};
+use std::{collections::HashMap, sync::LazyLock};
 use tokio::sync::RwLock;
 
 #[cfg(any(feature = "redis-pubsub", test))]
@@ -13,6 +13,33 @@ pub mod pubsub;
 
 #[cfg(any(feature = "redis-stream", test))]
 pub mod stream;
+
+#[cfg(any(feature = "testing-utils", test))]
+pub mod testing_utils;
+
+#[cfg(test)]
+mod tests;
+
+impl FromRedisValue for ByteMessage {
+    fn from_redis_value(v: Value) -> Result<Self, ParsingError> {
+        let parsed = parse_redis_value(&v)?;
+        let vectorized = serde_json::to_vec(&parsed)
+            .map_err(|e| ParsingError::from(format!("Failed to convert to bytes: {e:?}")))?;
+        Ok(ByteMessage::from_value(vectorized))
+    }
+}
+
+impl From<ParsingError> for PubSubError {
+    fn from(value: ParsingError) -> Self {
+        PubSubError::from_debug(value)
+    }
+}
+
+impl From<RedisError> for PubSubError {
+    fn from(value: RedisError) -> Self {
+        PubSubError::from_debug(value)
+    }
+}
 
 static HOST_MAP: LazyLock<RwLock<HashMap<String, ConnectionManager>>> =
     LazyLock::new(RwLock::default);
@@ -36,14 +63,34 @@ async fn get_connection(host: &str) -> Result<ConnectionManager, PubSubError> {
     }
 }
 
-impl FromRedisValue for ByteMessage {
-    fn from_redis_value(v: Value) -> Result<Self, ParsingError> {
-        Ok(ByteMessage::from_value(redis::from_redis_value(v)?))
+fn parse_redis_value(v: &Value) -> Result<JsonValue, ParsingError> {
+    if let Some(map_iter) = v.as_map_iter() {
+        parse_redis_map(map_iter)
+    } else if let Some(arr) = v.as_sequence() {
+        parse_redis_seq(arr)
+    } else {
+        let val = String::from_redis_value_ref(v)?;
+        Ok(JsonValue::String(val))
     }
 }
 
-impl From<RedisError> for PubSubError {
-    fn from(value: RedisError) -> Self {
-        PubSubError::from_debug(value)
+fn parse_redis_map<'a>(
+    redis: impl Iterator<Item = (&'a Value, &'a Value)>,
+) -> Result<JsonValue, ParsingError> {
+    let mut obj = Map::new();
+    for (key, redis_val) in redis {
+        obj.insert(
+            String::from_redis_value_ref(key)?,
+            parse_redis_value(redis_val)?,
+        );
     }
+    Ok(JsonValue::Object(obj))
+}
+
+fn parse_redis_seq(redis: &[Value]) -> Result<JsonValue, ParsingError> {
+    let mut arr: Vec<JsonValue> = Vec::new();
+    for entry in redis {
+        arr.push(parse_redis_value(entry)?);
+    }
+    Ok(JsonValue::Array(arr))
 }

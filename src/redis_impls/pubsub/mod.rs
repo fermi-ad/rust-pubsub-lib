@@ -14,6 +14,9 @@ use crate::{
 use redis::{AsyncCommands, Client};
 use tokio_stream::{Stream, StreamExt};
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Debug)]
 pub struct RedisPublisher {
     host: String,

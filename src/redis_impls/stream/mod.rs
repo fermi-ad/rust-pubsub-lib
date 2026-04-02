@@ -11,11 +11,10 @@ use crate::{
     ByteMessage, Message, PubSubError, Publisher, Snapshot, Subscriber, redis_impls::get_connection,
 };
 use redis::{
-    AsyncCommands, Value as RedisValue,
+    AsyncCommands, FromRedisValue, Value,
     streams::{StreamReadOptions, StreamReadReply},
 };
-use serde_json::{Map, Value as JSONValue, json, to_vec};
-use std::{collections::HashMap, fmt::Debug};
+use std::fmt::Debug;
 use tokio::sync::broadcast::{self, Receiver, Sender};
 use tokio_stream::{Stream, StreamExt, wrappers::BroadcastStream};
 
@@ -110,11 +109,14 @@ fn poll_redis(host: &str, topic: &str) -> (MsgSender, MsgReceiver) {
                     for stream in reply.keys {
                         for entry in stream.ids {
                             latest_id = entry.id;
-                            let message = redis_map_to_json(entry.map)
-                                .and_then(|deserialized| {
-                                    to_vec(&json!(deserialized)).map_err(PubSubError::from_debug)
-                                })
-                                .map(ByteMessage::from_value);
+                            let data: Vec<(Value, Value)> = entry
+                                .map
+                                .into_iter()
+                                .map(|(key, val)| (Value::SimpleString(key), val))
+                                .collect();
+                            let map = Value::Map(data);
+                            let message =
+                                ByteMessage::from_redis_value(map).map_err(PubSubError::from_debug);
                             let _ = cloned_sender.send(message);
                         }
                     }
@@ -126,46 +128,4 @@ fn poll_redis(host: &str, topic: &str) -> (MsgSender, MsgReceiver) {
         }
     });
     (sender, _channel_lock)
-}
-
-fn redis_map_to_json(redis: HashMap<String, RedisValue>) -> Result<JSONValue, PubSubError> {
-    let mut obj = Map::new();
-    for (key, redis_val) in redis {
-        if let Some(map_iter) = redis_val.as_map_iter() {
-            let mut inner = HashMap::new();
-            for (key, val) in map_iter {
-                let key_str = redis::from_redis_value_ref(key).map_err(PubSubError::from_debug)?;
-                inner.insert(key_str, val.to_owned());
-            }
-            obj.insert(key, redis_map_to_json(inner)?);
-        } else if let Some(arr) = redis_val.as_sequence() {
-            obj.insert(key, redis_seq_to_json(arr)?);
-        } else {
-            let val = redis::from_redis_value(redis_val).map_err(PubSubError::from_debug)?;
-            obj.insert(key, JSONValue::String(val));
-        }
-    }
-    Ok(JSONValue::Object(obj))
-}
-
-fn redis_seq_to_json(redis: &[RedisValue]) -> Result<JSONValue, PubSubError> {
-    let mut arr: Vec<JSONValue> = Vec::new();
-    for entry in redis {
-        if let Some(map_iter) = entry.as_map_iter() {
-            let mut inner = HashMap::new();
-            for (key, val) in map_iter {
-                let key_str = redis::from_redis_value_ref(key).map_err(PubSubError::from_debug)?;
-                inner.insert(key_str, val.to_owned());
-            }
-            arr.push(redis_map_to_json(inner)?);
-        } else if let Some(arr_val) = entry.as_sequence() {
-            arr.push(redis_seq_to_json(arr_val)?);
-        } else {
-            match redis::from_redis_value_ref(entry) {
-                Ok(val) => arr.push(JSONValue::String(val)),
-                Err(e) => return Err(PubSubError::from_debug(e)),
-            };
-        }
-    }
-    Ok(JSONValue::Array(arr))
 }
