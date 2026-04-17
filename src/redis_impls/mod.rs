@@ -1,6 +1,8 @@
-//! Redis Implementations Module
+//! Redis-backed implementations of the crate's core messaging traits.
 //!
-//! Houses the implementations of the public traits in this library for different "flavors" of Redis.
+//! This module groups the Redis support in the crate into two backend styles:
+//! native pub/sub and Redis Streams. It also contains shared conversion and connection-management
+//! helpers used by both styles.
 
 use crate::{ByteMessage, Message, PubSubError};
 use redis::{Client, FromRedisValue, ParsingError, RedisError, Value, aio::ConnectionManager};
@@ -8,12 +10,15 @@ use serde_json::{Map, Value as JsonValue};
 use std::{collections::HashMap, sync::LazyLock};
 use tokio::sync::RwLock;
 
+/// Redis pub/sub implementations for [`Publisher`](crate::Publisher) and [`Subscriber`](crate::Subscriber).
 #[cfg(any(feature = "redis-pubsub", test))]
 pub mod pubsub;
 
+/// Redis stream implementations for [`Publisher`](crate::Publisher), [`Snapshot`](crate::Snapshot), and [`Subscriber`](crate::Subscriber).
 #[cfg(any(feature = "redis-stream", test))]
 pub mod stream;
 
+/// Shared Redis testing utilities, including the in-process mock Redis server.
 #[cfg(any(feature = "testing-utils", test))]
 pub mod testing_utils;
 

@@ -1,11 +1,14 @@
-//! Redis Stream Implementations
+//! Redis Stream implementations of the crate's messaging traits.
 //!
-//! Contains implementations of the public traits in this library, configured for interactions with a Redis instance.
-//! NOTE: The Redis instance must be configured for stream interactions! Use feature `redis-pubsub` to interact with a pub/sub Redis instance.
+//! This module targets Redis Streams rather than native Redis pub/sub.
 //!
-//! Special considerations with this module:
-//! - Redis messages are keyed by an auto-incrementing number. Therefore, the [`key`](Message::key) for each [`Message`] will be ignored on
-//!   calls to [`RedisPublisher::publish`], and may not be useful when processing results from [`RedisSnapshot::get`] or [`RedisSubscriber::get_stream`].
+//! Special considerations:
+//! - Redis assigns stream entry identifiers itself, so a source message key is not preserved by
+//!   [`RedisPublisher`](crate::redis_impls::stream::RedisPublisher).
+//! - [`RedisSubscriber`](crate::redis_impls::stream::RedisSubscriber) polls Redis in a background
+//!   task and fans results out through a broadcast channel.
+//! - [`RedisSnapshot`](crate::redis_impls::stream::RedisSnapshot) reads the currently retained
+//!   entries from the stream at the time the request is made.
 
 use crate::{
     ByteMessage, Message, PubSubError, Publisher, Snapshot, Subscriber, redis_impls::get_connection,
@@ -18,6 +21,12 @@ use std::fmt::Debug;
 use tokio::sync::broadcast::{self, Receiver, Sender};
 use tokio_stream::{Stream, StreamExt, wrappers::BroadcastStream};
 
+#[cfg(test)]
+mod tests;
+
+/// Redis-backed [`Publisher`](crate::Publisher) implementation that writes to Redis Streams via `XADD`.
+///
+/// The message key is not preserved because Redis assigns its own stream entry identifier.
 #[derive(Debug)]
 pub struct RedisPublisher {
     host: String,
@@ -38,6 +47,10 @@ impl Publisher for RedisPublisher {
     }
 }
 
+/// Redis-backed [`Snapshot`](crate::Snapshot) implementation that reads the current stream contents.
+///
+/// The snapshot converts each retained stream entry into a [`ByteMessage`](crate::ByteMessage) and
+/// then into the requested message type.
 pub struct RedisSnapshot;
 #[async_trait::async_trait]
 impl Snapshot for RedisSnapshot {
@@ -48,6 +61,11 @@ impl Snapshot for RedisSnapshot {
     }
 }
 
+/// Redis-backed [`Subscriber`](crate::Subscriber) implementation that polls a Redis Stream and broadcasts updates.
+///
+/// A background task started by [`RedisSubscriber::new()`](crate::redis_impls::stream::RedisSubscriber::new)
+/// blocks on `XREAD`, forwards decoded entries through a broadcast channel, and stops once no
+/// receivers remain.
 pub struct RedisSubscriber {
     _channel_lock: Receiver<Result<ByteMessage, PubSubError>>,
     host: String,
@@ -94,7 +112,13 @@ fn poll_redis(host: &str, topic: &str) -> (MsgSender, MsgReceiver) {
     let cloned_sender = sender.clone();
     let cloned_topic = topic.to_owned();
     tokio::spawn(async move {
-        let mut conn = get_connection(&cloned_host).await.unwrap();
+        let mut conn = match get_connection(&cloned_host).await {
+            Ok(conn) => conn,
+            Err(err) => {
+                let _ = cloned_sender.send(Err(err));
+                return;
+            }
+        };
         let mut latest_id = String::from("$");
         let opts = StreamReadOptions::default().block(0);
         while cloned_sender.receiver_count() > 0 {

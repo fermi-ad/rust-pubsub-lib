@@ -37,12 +37,13 @@ fn from_kafka_error() {
 async fn kafka_consumer_and_producer() {
     let topic = String::from("test_topic");
     let test_harness = Harness::with_topics(vec![topic.clone()]).await;
+    let host = test_harness.host().await;
 
-    let mut test_sub = KafkaSubscriber::new(test_harness.host(), topic.clone());
+    let mut test_sub = KafkaSubscriber::new(host.clone(), topic.clone());
     let mut stream = test_sub.get_stream().await.unwrap();
 
     let message = StringMessage::from_value("testing".to_string());
-    let test_pub = KafkaPublisher::new(test_harness.host(), topic);
+    let test_pub = KafkaPublisher::new(host, topic);
     test_pub.publish(message.clone()).await.unwrap();
 
     assert_eq!(message, stream.next().await.unwrap().unwrap());
@@ -52,7 +53,7 @@ async fn kafka_consumer_and_producer() {
 async fn kafka_subscriber_shares_cached_stream_per_host_topic() {
     let topic = String::from("shared_topic");
     let test_harness = Harness::with_topics(vec![topic.clone()]).await;
-    let host = test_harness.host();
+    let host = test_harness.host().await;
 
     let mut first = KafkaSubscriber::new(host.clone(), topic.clone());
     let mut second = KafkaSubscriber::new(host.clone(), topic.clone());
@@ -64,19 +65,20 @@ async fn kafka_subscriber_shares_cached_stream_per_host_topic() {
     let entry = lock
         .get(&(host, topic))
         .expect("missing shared stream cache entry");
-    assert_eq!(2, entry.stream.receiver_count());
+    assert_eq!(2, entry.data.receiver_count());
 }
 
 #[tokio::test]
 async fn kafka_snapshot() {
     let topic = String::from("test_topic");
     let test_harness = Harness::with_topics(vec![topic.clone()]).await;
+    let host = test_harness.host().await;
 
     let message = StringMessage::new(None, "testing".to_string());
-    let test_pub = KafkaPublisher::new(test_harness.host(), topic.clone());
+    let test_pub = KafkaPublisher::new(host.clone(), topic.clone());
     test_pub.publish(message.clone()).await.unwrap();
 
-    let result = KafkaSnapshot::get(test_harness.host(), topic).await;
+    let result = KafkaSnapshot::get(host, topic).await;
     assert!(result.unwrap().contains(&message));
 }
 
@@ -84,10 +86,11 @@ async fn kafka_snapshot() {
 async fn kafka_snapshot_empty_topic_returns_empty_without_hanging() {
     let topic = String::from("empty_snapshot_topic");
     let test_harness = Harness::with_topics(vec![topic.clone()]).await;
+    let host = test_harness.host().await;
 
     let result = timeout(
         Duration::from_secs(2),
-        KafkaSnapshot::get::<String, StringMessage>(test_harness.host(), topic),
+        KafkaSnapshot::get::<String, StringMessage>(host, topic),
     )
     .await
     .expect("snapshot call timed out")

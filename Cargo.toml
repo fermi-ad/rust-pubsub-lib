@@ -12,6 +12,8 @@ serde = { version = "1.0.228", features = ["derive"], optional = true }
 serde_json = { version = "1.0.149", optional = true }
 tokio = { version = "1.50.0", features = ["io-util", "macros", "rt-multi-thread", "sync"] }
 tokio-stream = { version = "0.1.18", features = ["sync"] }
+tokio-util = { version = "0.7.16", features = ["rt"] }
+tracing = "0.1.44"
 uuid = { version = "1.23.0", features = ["v4"], optional = true }
 
 [dev-dependencies]

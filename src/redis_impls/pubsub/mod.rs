@@ -1,12 +1,13 @@
-//! Redis PubSub Implementations Module
+//! Redis pub/sub implementations of the crate's messaging traits.
 //!
-//! Contains implementations of the public traits in this library, configured for interactions with a Redis instance.
-//! NOTE: The Redis instance must be configured for pub/sub interactions! Use feature `redis-stream` to interact with a streaming Redis instance.
+//! This module targets Redis' native pub/sub mechanism.
 //!
-//! Special considerations with this module:
-//! - Redis does not support persistence in its pub/sub mode. Therefore, this module does not provide a [`Snapshot`](crate::Snapshot) implementation.
-//! - Redis messages are keyed by an auto-incrementing number. Therefore, the [`key`](Message::key) for each [`Message`] will be ignored on
-//!   calls to [`RedisPublisher::publish`], and may not be useful when processing results from [`RedisSubscriber::get_stream`].
+//! Special considerations:
+//! - Redis pub/sub does not retain history, so there is no [`Snapshot`](crate::Snapshot)
+//!   implementation in this module.
+//! - Redis pub/sub payloads are treated as message values only. The source message key supplied to
+//!   [`RedisPublisher::publish()`](crate::redis_impls::pubsub::RedisPublisher::publish) is ignored.
+//! - Subscribers only observe messages published after subscription begins.
 
 use crate::{
     ByteMessage, Message, PubSubError, Publisher, Subscriber, redis_impls::get_connection,
@@ -17,6 +18,10 @@ use tokio_stream::{Stream, StreamExt};
 #[cfg(test)]
 mod tests;
 
+/// Redis-backed [`Publisher`](crate::Publisher) implementation using native Redis pub/sub channels.
+///
+/// Redis pub/sub messages are delivered as payloads only, so any message key supplied to
+/// [`Publisher::publish()`](crate::Publisher::publish) is ignored by this backend.
 #[derive(Debug)]
 pub struct RedisPublisher {
     host: String,
@@ -35,6 +40,10 @@ impl Publisher for RedisPublisher {
     }
 }
 
+/// Redis-backed [`Subscriber`](crate::Subscriber) implementation using native Redis pub/sub channels.
+///
+/// Each call to [`Subscriber::new()`](crate::Subscriber::new) creates a fresh subscriber that opens
+/// its own pub/sub connection when [`Subscriber::get_stream()`](crate::Subscriber::get_stream) is called.
 #[derive(Debug)]
 pub struct RedisSubscriber {
     host: String,

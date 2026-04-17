@@ -1,6 +1,11 @@
-//! Kafka Implementations Module
+//! Kafka-backed implementations of the crate's core messaging traits.
 //!
-//! Contains implementations of the public traits in this library, configured for interactions with a Kafka instance.
+//! This module provides Kafka implementations for [`Publisher`](crate::Publisher),
+//! [`Snapshot`](crate::Snapshot), and [`Subscriber`](crate::Subscriber).
+//!
+//! The Kafka subscriber path shares a cached stream per host/topic pair within the process so that
+//! multiple subscribers can reuse the same background Kafka consumer task. Idle cached producers and
+//! streams are eventually cleaned up by an internal reaper task.
 
 use crate::{ByteMessage, Message, PubSubError, Publisher, Snapshot, Subscriber};
 use rdkafka::{
@@ -34,62 +39,32 @@ pub mod testing_utils;
 #[cfg(test)]
 mod tests;
 
-/// [`FutureProducer`] is intended to be a one-per-host construct, shared by all parts of the application that need to produce on that host.
-/// As such, we build a static map of the producers to be shared by all instances of [`KafkaPublisher`] that get requested for the same host.
-static PRODUCER_MAP: LazyLock<RwLock<HashMap<String, FutureProducer>>> =
-    LazyLock::new(RwLock::default);
-
-/// Kafka subscriber streams are shared by host/topic across the process.
-static CONSUMER_MAP: LazyLock<RwLock<HashMap<(String, String), StreamEntry>>> =
-    LazyLock::new(|| RwLock::new(HashMap::new()));
-
-static REAPER_STARTED: LazyLock<()> = LazyLock::new(|| {
-    tokio::spawn(reap_unused_streams());
-});
-
-const REAPER_INTERVAL: Duration = Duration::from_secs(10);
-const EVICT_AFTER_IDLE: Duration = Duration::from_secs(60);
-const SNAPSHOT_MESSAGE_TIMEOUT: Duration = Duration::from_secs(5);
-
-#[derive(Debug)]
-struct StreamEntry {
-    stream: KafkaStream,
-    last_used: Instant,
-}
-
-impl From<KafkaError> for PubSubError {
-    fn from(value: KafkaError) -> Self {
-        PubSubError::from_display(value)
-    }
-}
-
-/// Implementation of the [`Publisher`] trait for Kafka connections.
+/// Implementation of the [`Publisher`](crate::Publisher) trait for Kafka connections.
+///
+/// Producers are cached per Kafka bootstrap host so repeated publishes can reuse an existing
+/// connection instead of constructing a fresh producer every time.
 pub struct KafkaPublisher {
     host: String,
     topic: String,
 }
 impl KafkaPublisher {
     async fn get_connection(&self) -> Result<FutureProducer, PubSubError> {
-        let naive_read = PRODUCER_MAP.read().await.get(&self.host).cloned();
-        match naive_read {
-            Some(producer) => Ok(producer),
-            None => {
-                let mut lock = PRODUCER_MAP.write().await;
-                match lock.get(&self.host).cloned() {
-                    Some(producer) => Ok(producer),
-                    None => {
-                        let default = ClientConfig::new()
-                            .set("bootstrap.servers", &self.host)
-                            .create()?;
-                        let producer = lock
-                            .entry(self.host.clone())
-                            .insert_entry(default)
-                            .get()
-                            .clone();
-                        Ok(producer)
-                    }
-                }
-            }
+        let mut lock = PRODUCER_MAP.write().await;
+        if let Some(entry) = lock.get_mut(&self.host) {
+            entry.last_used = Instant::now();
+            Ok(entry.data.clone())
+        } else {
+            let default: FutureProducer = ClientConfig::new()
+                .set("bootstrap.servers", &self.host)
+                .create()?;
+            lock.insert(
+                self.host.clone(),
+                CacheEntry {
+                    data: default.clone(),
+                    last_used: Instant::now(),
+                },
+            );
+            Ok(default)
         }
     }
 }
@@ -121,7 +96,11 @@ impl Debug for KafkaPublisher {
     }
 }
 
-/// Implementation of the [`Snapshot`] trait for Kafka connections.
+/// Implementation of the [`Snapshot`](crate::Snapshot) trait for Kafka connections.
+///
+/// A snapshot creates a short-lived consumer, determines the current high watermark for each
+/// partition, and then reads until those last known offsets have been observed. This means the
+/// snapshot represents the topic contents visible at the time offset discovery completes.
 #[derive(Debug)]
 pub struct KafkaSnapshot;
 impl KafkaSnapshot {
@@ -186,7 +165,11 @@ impl Snapshot for KafkaSnapshot {
     }
 }
 
-/// Implementation of the [`Subscriber`] trait for Kafka connections.
+/// Implementation of the [`Subscriber`](crate::Subscriber) trait for Kafka connections.
+///
+/// Subscribers reuse a shared [`KafkaStream`](stream::KafkaStream) per host/topic pair. This avoids
+/// spinning up duplicate consumers when multiple callers subscribe to the same Kafka topic inside a
+/// single process.
 pub struct KafkaSubscriber {
     host: String,
     topic: String,
@@ -199,7 +182,7 @@ impl KafkaSubscriber {
             .read()
             .await
             .get(&key)
-            .map(|entry| entry.stream.get_stream())
+            .map(|entry| entry.data.get_stream())
         {
             return stream;
         }
@@ -207,14 +190,14 @@ impl KafkaSubscriber {
         let mut lock = CONSUMER_MAP.write().await;
 
         if let Some(entry) = lock.get(&key) {
-            return entry.stream.get_stream();
+            return entry.data.get_stream();
         }
 
-        let entry = lock.entry(key).or_insert_with(|| StreamEntry {
-            stream: KafkaStream::new(self.host.clone(), self.topic.clone()),
+        let entry = lock.entry(key).or_insert_with(|| CacheEntry {
+            data: KafkaStream::new(self.host.clone(), self.topic.clone()),
             last_used: Instant::now(),
         });
-        entry.stream.get_stream()
+        entry.data.get_stream()
     }
 
     fn convert_stream<T, M: Message<T>>(
@@ -247,6 +230,35 @@ impl Debug for KafkaSubscriber {
     }
 }
 
+#[derive(Debug)]
+struct CacheEntry<T> {
+    data: T,
+    last_used: Instant,
+}
+
+/// [`FutureProducer`] is intended to be a one-per-host construct, shared by all parts of the application that need to produce on that host.
+/// As such, we build a static map of the producers to be shared by all instances of [`KafkaPublisher`] that get requested for the same host.
+static PRODUCER_MAP: LazyLock<RwLock<HashMap<String, CacheEntry<FutureProducer>>>> =
+    LazyLock::new(RwLock::default);
+
+/// Kafka subscriber streams are shared by host/topic across the process.
+static CONSUMER_MAP: LazyLock<RwLock<HashMap<(String, String), CacheEntry<KafkaStream>>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
+static REAPER_STARTED: LazyLock<()> = LazyLock::new(|| {
+    tokio::spawn(reap_unused_streams());
+});
+
+const REAPER_INTERVAL: Duration = Duration::from_secs(10);
+const EVICT_AFTER_IDLE: Duration = Duration::from_secs(60);
+const SNAPSHOT_MESSAGE_TIMEOUT: Duration = Duration::from_secs(5);
+
+impl From<KafkaError> for PubSubError {
+    fn from(value: KafkaError) -> Self {
+        PubSubError::from_display(value)
+    }
+}
+
 fn convert_to_message<T, M: Message<T>>(incoming: BorrowedMessage) -> Result<M, PubSubError> {
     let value = incoming.payload().ok_or_else(PubSubError::default)?;
     let key = incoming.key();
@@ -265,12 +277,16 @@ async fn reap_unused_streams() {
 
         let now = Instant::now();
         CONSUMER_MAP.write().await.retain(|_, entry| {
-            if entry.stream.receiver_count() > 0 {
+            if entry.data.receiver_count() > 0 {
                 entry.last_used = now;
                 true
             } else {
                 now.duration_since(entry.last_used) < EVICT_AFTER_IDLE
             }
         });
+        PRODUCER_MAP
+            .write()
+            .await
+            .retain(|_, entry| now.duration_since(entry.last_used) < EVICT_AFTER_IDLE);
     }
 }

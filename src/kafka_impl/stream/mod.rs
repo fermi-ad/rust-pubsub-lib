@@ -1,3 +1,13 @@
+//! Internal Kafka stream management used by [`KafkaSubscriber`](super::KafkaSubscriber).
+//!
+//! [`KafkaStream`](crate::kafka_impl::stream::KafkaStream) owns a background task that connects to
+//! Kafka, subscribes to a single topic, and fans incoming messages out to all active subscribers via
+//! a Tokio broadcast channel.
+//!
+//! The type is public because it participates in the crate's exported implementation surface, but it
+//! is primarily intended for use by the Kafka subscriber implementation in [`super`](super).
+//! Consumers should treat its behavior as backend infrastructure rather than as a first-choice API.
+
 use crate::{ByteMessage, Message};
 use rdkafka::{
     ClientConfig,
@@ -7,63 +17,83 @@ use rdkafka::{
 };
 use std::time::Duration;
 use tokio::{
-    select, spawn,
-    sync::{
-        broadcast::{Sender, channel},
-        watch,
-    },
+    spawn,
+    sync::broadcast::{Sender, channel},
     time::sleep,
 };
 use tokio_stream::{StreamExt, wrappers::BroadcastStream};
+use tokio_util::sync::CancellationToken;
+use tracing::error;
 use uuid::Uuid;
 
-const MAX_WAIT_TIME: Duration = Duration::from_secs(300);
-
+/// Shared Kafka message stream for one host/topic pair.
+///
+/// Creating a [`KafkaStream`](crate::kafka_impl::stream::KafkaStream) spawns a background task that
+/// reconnects as needed and forwards messages to any listeners returned by
+/// [`KafkaStream::get_stream()`](crate::kafka_impl::stream::KafkaStream::get_stream).
 #[derive(Debug)]
-pub(crate) struct KafkaStream {
-    cancel_sender: watch::Sender<bool>,
+pub struct KafkaStream {
+    cancel_token: CancellationToken,
     sender: Sender<ByteMessage>,
 }
 
 impl KafkaStream {
-    pub(crate) fn receiver_count(&self) -> usize {
+    /// Returns the number of active broadcast receivers currently attached to this stream.
+    ///
+    /// This is used internally to decide when an idle cached stream can be evicted.
+    pub fn receiver_count(&self) -> usize {
         self.sender.receiver_count()
     }
 
-    pub(crate) fn new(host: String, topic: String) -> Self {
+    /// Creates a new shared Kafka stream for a host/topic pair.
+    ///
+    /// The returned instance starts a background task immediately. That task attempts to connect,
+    /// subscribe, and keep forwarding messages until this value is dropped.
+    pub fn new(host: String, topic: String) -> Self {
         let (sender, _) = channel(100);
         let remote_sender = sender.clone();
 
-        let (cancel_sender, cancel_receiver) = watch::channel(false);
+        let cancel_token = CancellationToken::new();
 
-        spawn(start_stream(host, topic, remote_sender, cancel_receiver));
+        spawn(start_stream(
+            host,
+            topic,
+            remote_sender,
+            cancel_token.child_token(),
+        ));
 
         Self {
-            cancel_sender,
+            cancel_token,
             sender,
         }
     }
 
-    pub(crate) fn get_stream(&self) -> BroadcastStream<ByteMessage> {
+    /// Returns a new broadcast-backed message stream for this Kafka topic.
+    ///
+    /// Each caller receives its own broadcast receiver and therefore sees messages published after
+    /// the receiver is created.
+    pub fn get_stream(&self) -> BroadcastStream<ByteMessage> {
         BroadcastStream::new(self.sender.subscribe())
     }
 }
 
 impl Drop for KafkaStream {
     fn drop(&mut self) {
-        let _ = self.cancel_sender.send(true);
+        self.cancel_token.cancel();
     }
 }
+
+const MAX_WAIT_TIME: Duration = Duration::from_secs(300);
 
 async fn start_stream(
     host: String,
     topic: String,
     sender: Sender<ByteMessage>,
-    mut cancel_receiver: watch::Receiver<bool>,
+    cancel_token: CancellationToken,
 ) {
     let stream_id = Uuid::new_v4().as_hyphenated().to_string();
-    let mut wait_time = Duration::from_secs(1);
-    while !*cancel_receiver.borrow() {
+    let mut error_backoff_time = Duration::from_secs(1);
+    while !cancel_token.is_cancelled() {
         let mut builder = ClientConfig::new();
         builder.set("bootstrap.servers", &host);
         builder.set("group.id", &stream_id);
@@ -74,15 +104,17 @@ async fn start_stream(
         match builder.create::<StreamConsumer>() {
             Ok(consumer) => {
                 if let Err(e) = consumer.subscribe(&[&topic]) {
-                    wait_time = handle_connection_err(e, wait_time, &mut cancel_receiver).await;
+                    error_backoff_time = handle_connection_err(e, error_backoff_time).await;
                 } else {
                     let message_stream = consumer.stream();
-                    monitor_stream(message_stream, &sender, cancel_receiver.clone()).await;
-                    wait_time = Duration::from_secs(1);
+                    cancel_token
+                        .run_until_cancelled(monitor_stream(message_stream, &sender))
+                        .await;
+                    error_backoff_time = Duration::from_secs(1);
                 }
             }
             Err(e) => {
-                wait_time = handle_connection_err(e, wait_time, &mut cancel_receiver).await;
+                error_backoff_time = handle_connection_err(e, error_backoff_time).await;
             }
         }
     }
@@ -91,49 +123,23 @@ async fn start_stream(
 async fn monitor_stream<C: ConsumerContext>(
     mut message_stream: MessageStream<'_, C>,
     sender: &Sender<ByteMessage>,
-    mut cancel_receiver: watch::Receiver<bool>,
 ) {
-    loop {
-        select! {
-            _ = cancel_receiver.changed() => {
-                if *cancel_receiver.borrow() {
-                    break;
-                }
-            }
-            incoming = message_stream.next() => {
-                match incoming {
-                    Some(Ok(msg)) => {
-                        if let Some(message) = convert_to_message(&msg) {
-                            let _ = sender.send(message);
-                        }
-                    }
-                    Some(Err(_)) => break,
-                    None => break,
-                }
-            }
+    while let Some(Ok(msg)) = message_stream.next().await {
+        if let Some(message) = convert_to_message(&msg) {
+            let _ = sender.send(message);
         }
     }
 }
 
 fn convert_to_message(incoming: &BorrowedMessage) -> Option<ByteMessage> {
-    incoming.payload().map(|value_bytes| {
-        <ByteMessage as Message<Vec<u8>>>::from_bytes(incoming.key(), value_bytes)
-    })
+    incoming
+        .payload()
+        .map(|value_bytes| ByteMessage::from_bytes(incoming.key(), value_bytes))
 }
 
-async fn handle_connection_err(
-    _err: KafkaError,
-    mut wait_time: Duration,
-    cancel_receiver: &mut watch::Receiver<bool>,
-) -> Duration {
-    if *cancel_receiver.borrow() {
-        return wait_time;
-    }
-
-    select! {
-        _ = cancel_receiver.changed() => {},
-        _ = sleep(wait_time) => {},
-    }
+async fn handle_connection_err(err: KafkaError, mut wait_time: Duration) -> Duration {
+    error!("{err:?}");
+    sleep(wait_time).await;
 
     wait_time *= 2;
     if wait_time > MAX_WAIT_TIME {
