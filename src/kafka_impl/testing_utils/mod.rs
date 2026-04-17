@@ -95,7 +95,7 @@ impl MockKafka {
 static MOCK_CLUSTER: OnceCell<MockKafka> = OnceCell::const_new();
 
 async fn get_mock_cluster() -> &'static MockKafka {
-    MOCK_CLUSTER.get_or_init(|| MockKafka::new()).await
+    MOCK_CLUSTER.get_or_init(MockKafka::new).await
 }
 
 /// Drives the shared [`MockCluster`](rdkafka::mocking::MockCluster) worker thread.

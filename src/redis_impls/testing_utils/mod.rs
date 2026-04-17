@@ -193,7 +193,7 @@ async fn read_stream(
         Ok(n) => {
             pending.push_str(&String::from_utf8_lossy(&buffer[..n]));
 
-            let (commands, consumed) = parse_resp_commands(&pending);
+            let (commands, consumed) = parse_resp_commands(pending.as_str());
             if consumed > 0 {
                 pending.drain(..consumed);
             }
