@@ -8,33 +8,28 @@
 //! streams are eventually cleaned up by an internal reaper task.
 
 use crate::{ByteMessage, Message, PubSubError, Publisher, Snapshot, Subscriber};
-use rdkafka::{
-    ClientConfig, Message as RdMessage,
-    consumer::{Consumer, StreamConsumer},
-    error::KafkaError,
-    message::BorrowedMessage,
-    producer::{FutureProducer, FutureRecord},
-    types::RDKafkaErrorCode,
-};
+use rdkafka::consumer::{Consumer, StreamConsumer};
+use rdkafka::error::KafkaError;
+use rdkafka::message::BorrowedMessage;
+use rdkafka::producer::{FutureProducer, FutureRecord};
+use rdkafka::types::RDKafkaErrorCode;
+use rdkafka::{ClientConfig, Message as RdMessage};
 use rust_env_var_lib::env_var;
-use std::{
-    collections::HashMap,
-    fmt::{Debug, Formatter, Result as FmtResult},
-    sync::LazyLock,
-    time::{Duration, Instant},
-};
+use std::collections::HashMap;
+use std::fmt::{Debug, Formatter, Result as FmtResult};
+use std::sync::LazyLock;
+use std::time::{Duration, Instant};
 use stream::KafkaStream;
-use tokio::{
-    sync::RwLock,
-    time::{sleep, timeout},
-};
-use tokio_stream::{Stream, StreamExt, wrappers::BroadcastStream};
+use tokio::sync::RwLock;
+use tokio::time::{sleep, timeout};
+use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::{Stream, StreamExt};
 use uuid::Uuid;
-
-mod stream;
 
 #[cfg(any(feature = "testing-utils", test))]
 pub mod testing_utils;
+
+mod stream;
 
 #[cfg(test)]
 mod tests;

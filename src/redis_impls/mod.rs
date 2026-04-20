@@ -5,9 +5,11 @@
 //! helpers used by both styles.
 
 use crate::{ByteMessage, Message, PubSubError};
-use redis::{Client, FromRedisValue, ParsingError, RedisError, Value, aio::ConnectionManager};
+use redis::aio::ConnectionManager;
+use redis::{Client, FromRedisValue, ParsingError, RedisError, Value};
 use serde_json::{Map, Value as JsonValue};
-use std::{collections::HashMap, sync::LazyLock};
+use std::collections::HashMap;
+use std::sync::LazyLock;
 use tokio::sync::RwLock;
 
 /// Redis pub/sub implementations for [`Publisher`](crate::Publisher) and [`Subscriber`](crate::Subscriber).

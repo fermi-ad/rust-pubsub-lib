@@ -9,19 +9,16 @@
 //! Consumers should treat its behavior as backend infrastructure rather than as a first-choice API.
 
 use crate::{ByteMessage, Message};
-use rdkafka::{
-    ClientConfig,
-    consumer::{Consumer, ConsumerContext, MessageStream, StreamConsumer},
-    error::KafkaError,
-    message::{BorrowedMessage, Message as RdMessage},
-};
+use rdkafka::ClientConfig;
+use rdkafka::consumer::{Consumer, ConsumerContext, MessageStream, StreamConsumer};
+use rdkafka::error::KafkaError;
+use rdkafka::message::{BorrowedMessage, Message as RdMessage};
 use std::time::Duration;
-use tokio::{
-    spawn,
-    sync::broadcast::{Sender, channel},
-    time::sleep,
-};
-use tokio_stream::{StreamExt, wrappers::BroadcastStream};
+use tokio::spawn;
+use tokio::sync::broadcast::{Sender, channel};
+use tokio::time::sleep;
+use tokio_stream::StreamExt;
+use tokio_stream::wrappers::BroadcastStream;
 use tokio_util::sync::CancellationToken;
 use tracing::error;
 use uuid::Uuid;

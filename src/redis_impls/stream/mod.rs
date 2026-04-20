@@ -10,16 +10,14 @@
 //! - [`RedisSnapshot`](crate::redis_impls::stream::RedisSnapshot) reads the currently retained
 //!   entries from the stream at the time the request is made.
 
-use crate::{
-    ByteMessage, Message, PubSubError, Publisher, Snapshot, Subscriber, redis_impls::get_connection,
-};
-use redis::{
-    AsyncCommands, FromRedisValue, Value,
-    streams::{StreamReadOptions, StreamReadReply},
-};
+use crate::redis_impls::get_connection;
+use crate::{ByteMessage, Message, PubSubError, Publisher, Snapshot, Subscriber};
+use redis::streams::{StreamReadOptions, StreamReadReply};
+use redis::{AsyncCommands, FromRedisValue, Value};
 use std::fmt::Debug;
 use tokio::sync::broadcast::{self, Receiver, Sender};
-use tokio_stream::{Stream, StreamExt, wrappers::BroadcastStream};
+use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::{Stream, StreamExt};
 
 #[cfg(test)]
 mod tests;

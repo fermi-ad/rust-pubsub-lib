@@ -3,13 +3,13 @@
 //! Tests for shared Redis parsing, error conversion, and connection caching behavior.
 
 use super::*;
-use crate::{ByteMessage, StringMessage, redis_impls::testing_utils::TestContext};
+use crate::{ByteMessage, RedisTestHarness, StringMessage};
 use redis::{AsyncTypedCommands, Value};
 use serde_json::json;
 
 #[tokio::test]
 async fn test_get_connection_reuses_cached_manager_for_same_host() {
-    let context = TestContext::new(None).await;
+    let context = RedisTestHarness::new(None).await;
     let host = context.get_host();
 
     let mut mgr = get_connection(&host).await.unwrap();

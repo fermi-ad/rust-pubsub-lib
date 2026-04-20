@@ -1,14 +1,14 @@
 //! Redis Stream implementation tests.
 
 use super::*;
-use crate::{Message, StringMessage, redis_impls::testing_utils::TestContext};
+use crate::{Message, RedisTestHarness, StringMessage};
 use std::time::Duration;
 use tokio::time::{sleep, timeout};
 use tokio_stream::StreamExt;
 
 #[tokio::test]
 async fn redis_stream_publish_records_payload_on_mock_server() {
-    let mut context = TestContext::new(None).await;
+    let mut context = RedisTestHarness::new(None).await;
     let publisher = RedisPublisher::new(context.get_host(), "stream-topic".to_string());
 
     publisher
@@ -25,7 +25,7 @@ async fn redis_stream_publish_records_payload_on_mock_server() {
 
 #[tokio::test]
 async fn redis_stream_snapshot_is_empty_for_unseen_stream() {
-    let context = TestContext::new(None).await;
+    let context = RedisTestHarness::new(None).await;
 
     let snapshot = RedisSnapshot::get::<String, StringMessage>(
         context.get_host(),
@@ -39,7 +39,7 @@ async fn redis_stream_snapshot_is_empty_for_unseen_stream() {
 
 #[tokio::test]
 async fn redis_stream_snapshot_returns_existing_entries() {
-    let mut context = TestContext::new(None).await;
+    let mut context = RedisTestHarness::new(None).await;
     let host = context.get_host();
     let publisher = RedisPublisher::new(host.clone(), "snapshot-stream-topic".to_string());
 
@@ -64,7 +64,7 @@ async fn redis_stream_snapshot_returns_existing_entries() {
 
 #[tokio::test]
 async fn redis_stream_subscriber_receives_messages() {
-    let mut context = TestContext::new(None).await;
+    let mut context = RedisTestHarness::new(None).await;
     let host = context.get_host();
     let topic = "subscriber-stream-topic".to_string();
     let mut subscriber = RedisSubscriber::new(host.clone(), topic.clone());
@@ -90,7 +90,7 @@ async fn redis_stream_subscriber_receives_messages() {
 
 #[tokio::test]
 async fn redis_stream_fans_out_to_multiple_subscribers() {
-    let mut context = TestContext::new(None).await;
+    let mut context = RedisTestHarness::new(None).await;
     let host = context.get_host();
     let topic = "fanout-stream-topic".to_string();
     let mut first = RedisSubscriber::new(host.clone(), topic.clone());

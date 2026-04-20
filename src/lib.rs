@@ -77,13 +77,36 @@ use std::{
 };
 use tokio_stream::Stream;
 
+#[cfg(any(all(feature = "kafka", feature = "testing-utils"), test))]
+pub use kafka_impl::testing_utils::Harness as KafkaTestHarness;
+#[cfg(any(feature = "kafka", test))]
+pub use kafka_impl::{KafkaPublisher, KafkaSnapshot, KafkaSubscriber};
+
+#[cfg(any(feature = "redis-pubsub", test))]
+pub use redis_impls::pubsub::{
+    RedisPublisher as RedisPubSubPublisher, RedisSubscriber as RedisPubSubSubscriber,
+};
+#[cfg(any(feature = "redis-stream", test))]
+pub use redis_impls::stream::{
+    RedisPublisher as RedisStreamPublisher, RedisSnapshot as RedisStreamSnapshot,
+    RedisSubscriber as RedisStreamSubscriber,
+};
+#[cfg(any(
+    all(
+        any(feature = "redis-pubsub", feature = "redis-stream"),
+        feature = "testing-utils"
+    ),
+    test
+))]
+pub use redis_impls::testing_utils::TestHarness as RedisTestHarness;
+
 /// Kafka-backed implementations of the core pub/sub traits.
 #[cfg(any(feature = "kafka", test))]
-pub mod kafka_impl;
+mod kafka_impl;
 
 /// Redis-backed implementations of the core pub/sub traits.
 #[cfg(any(feature = "redis-pubsub", feature = "redis-stream", test))]
-pub mod redis_impls;
+mod redis_impls;
 
 #[cfg(test)]
 mod tests;

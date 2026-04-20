@@ -7,12 +7,13 @@
 //! should not assume isolation from messages published by unrelated tests that reuse a topic.
 
 use rdkafka::mocking::MockCluster;
-use std::{collections::HashSet, thread::spawn};
-use tokio::sync::{
-    OnceCell, RwLock,
-    mpsc::{self, Sender},
-    oneshot,
-};
+use std::collections::HashSet;
+use std::thread::spawn;
+use tokio::sync::mpsc::{self, Sender};
+use tokio::sync::{OnceCell, RwLock, oneshot};
+
+#[cfg(test)]
+mod tests;
 
 /// A lightweight handle for using the shared test [`MockCluster`](rdkafka::mocking::MockCluster).
 ///
@@ -111,52 +112,5 @@ fn run_cluster(host_sender: oneshot::Sender<String>, mut topic_receiver: mpsc::R
     // `blocking_recv` will return `None` when all senders are dropped (i.e., when tests are over).
     while let Some(topic) = topic_receiver.blocking_recv() {
         let _ = mock_cluster.create_topic(&topic, 3, 1);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn harness_host_matches_shared_cluster_host() {
-        let harness = Harness::with_topics(vec![]).await;
-        assert_eq!(harness.host().await, get_mock_cluster().await.host());
-    }
-
-    #[tokio::test]
-    async fn harness_with_topics_populates_known_topic_set_once() {
-        let topic = "kafka-harness-known-topic".to_string();
-        let _ = Harness::with_topics(vec![topic.clone(), topic.clone()]).await;
-
-        let count = get_mock_cluster()
-            .await
-            .known_topics
-            .read()
-            .await
-            .iter()
-            .filter(|known| known.as_str() == topic)
-            .count();
-
-        assert_eq!(1, count);
-    }
-
-    #[tokio::test]
-    async fn mock_kafka_create_topic_deduplicates_requests() {
-        let topic = "kafka-harness-dedup-topic".to_string();
-        let _ = Harness::with_topics(vec![]).await;
-        get_mock_cluster().await.create_topic(topic.clone()).await;
-        get_mock_cluster().await.create_topic(topic.clone()).await;
-
-        let count = get_mock_cluster()
-            .await
-            .known_topics
-            .read()
-            .await
-            .iter()
-            .filter(|known| known.as_str() == topic)
-            .count();
-
-        assert_eq!(1, count);
     }
 }

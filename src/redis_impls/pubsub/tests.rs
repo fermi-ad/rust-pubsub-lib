@@ -3,14 +3,15 @@
 //! Tests for the Redis pub/sub implementations of the public traits in this library.
 
 use super::*;
-use crate::{Message, StringMessage, redis_impls::testing_utils::TestContext};
-use std::{collections::HashMap, time::Duration};
+use crate::{Message, RedisTestHarness, StringMessage};
+use std::collections::HashMap;
+use std::time::Duration;
 use tokio::time::timeout;
 use tokio_stream::StreamExt;
 
 #[tokio::test]
 async fn test_publish() {
-    let mut context = TestContext::new(None).await;
+    let mut context = RedisTestHarness::new(None).await;
     let publisher = RedisPublisher::new(context.get_host(), "test-topic".to_string());
     let message = StringMessage::from_value("Hello, Redis PubSub!".to_string());
     publisher.publish(message).await.unwrap();
@@ -24,7 +25,7 @@ async fn test_publish() {
 
 #[tokio::test]
 async fn test_publish_ignores_message_key() {
-    let mut context = TestContext::new(None).await;
+    let mut context = RedisTestHarness::new(None).await;
     let publisher = RedisPublisher::new(context.get_host(), "test-topic".to_string());
     let message = StringMessage::new(
         Some("ignored-key".to_string()),
@@ -44,7 +45,7 @@ async fn test_publish_ignores_message_key() {
 
 #[tokio::test]
 async fn test_subscribe() {
-    let context = TestContext::new(Some(HashMap::from([(
+    let context = RedisTestHarness::new(Some(HashMap::from([(
         "test-topic".to_string(),
         vec!["Hello, Redis PubSub!".to_string()],
     )])))
@@ -68,7 +69,7 @@ async fn test_subscribe() {
 
 #[tokio::test]
 async fn test_subscribe_receives_multiple_messages_in_order() {
-    let context = TestContext::new(Some(HashMap::from([(
+    let context = RedisTestHarness::new(Some(HashMap::from([(
         "test-topic".to_string(),
         vec![
             "first".to_string(),

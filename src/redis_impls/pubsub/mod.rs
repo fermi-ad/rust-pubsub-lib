@@ -9,9 +9,8 @@
 //!   [`RedisPublisher::publish()`](crate::redis_impls::pubsub::RedisPublisher::publish) is ignored.
 //! - Subscribers only observe messages published after subscription begins.
 
-use crate::{
-    ByteMessage, Message, PubSubError, Publisher, Subscriber, redis_impls::get_connection,
-};
+use crate::redis_impls::get_connection;
+use crate::{ByteMessage, Message, PubSubError, Publisher, Subscriber};
 use redis::{AsyncCommands, Client};
 use tokio_stream::{Stream, StreamExt};
 

@@ -1,7 +1,7 @@
 //! The tests for the Kafka Implementation Module
 
 use super::*;
-use crate::{StringMessage, kafka_impl::testing_utils::Harness};
+use crate::{KafkaTestHarness, StringMessage};
 use tokio::time::{Duration, timeout};
 use tokio_stream::StreamExt;
 
@@ -36,7 +36,7 @@ fn from_kafka_error() {
 #[tokio::test]
 async fn kafka_consumer_and_producer() {
     let topic = String::from("test_topic");
-    let test_harness = Harness::with_topics(vec![topic.clone()]).await;
+    let test_harness = KafkaTestHarness::with_topics(vec![topic.clone()]).await;
     let host = test_harness.host().await;
 
     let mut test_sub = KafkaSubscriber::new(host.clone(), topic.clone());
@@ -52,7 +52,7 @@ async fn kafka_consumer_and_producer() {
 #[tokio::test]
 async fn kafka_subscriber_shares_cached_stream_per_host_topic() {
     let topic = String::from("shared_topic");
-    let test_harness = Harness::with_topics(vec![topic.clone()]).await;
+    let test_harness = KafkaTestHarness::with_topics(vec![topic.clone()]).await;
     let host = test_harness.host().await;
 
     let mut first = KafkaSubscriber::new(host.clone(), topic.clone());
@@ -71,7 +71,7 @@ async fn kafka_subscriber_shares_cached_stream_per_host_topic() {
 #[tokio::test]
 async fn kafka_snapshot() {
     let topic = String::from("test_topic");
-    let test_harness = Harness::with_topics(vec![topic.clone()]).await;
+    let test_harness = KafkaTestHarness::with_topics(vec![topic.clone()]).await;
     let host = test_harness.host().await;
 
     let message = StringMessage::new(None, "testing".to_string());
@@ -85,7 +85,7 @@ async fn kafka_snapshot() {
 #[tokio::test]
 async fn kafka_snapshot_empty_topic_returns_empty_without_hanging() {
     let topic = String::from("empty_snapshot_topic");
-    let test_harness = Harness::with_topics(vec![topic.clone()]).await;
+    let test_harness = KafkaTestHarness::with_topics(vec![topic.clone()]).await;
     let host = test_harness.host().await;
 
     let result = timeout(
