@@ -71,16 +71,6 @@ fn string_message_new_and_from_value_are_consistent() {
 }
 
 #[test]
-fn string_message_as_bytes_round_trips_key_and_value() {
-    let message = StringMessage::new(Some("hello".to_string()), "world".to_string());
-    let bytes = message.as_bytes();
-
-    assert_eq!(Some(b"hello".to_vec()), bytes.key());
-    assert_eq!(b"world".to_vec(), bytes.value());
-    assert_eq!(message, StringMessage::from(bytes));
-}
-
-#[test]
 fn string_message_into_bytes_round_trips_key_and_value() {
     let message = StringMessage::new(Some("into-key".to_string()), "into-value".to_string());
     let bytes = message.clone().into_bytes();

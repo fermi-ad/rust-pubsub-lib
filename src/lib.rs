@@ -136,10 +136,6 @@ impl Message<Vec<u8>> for ByteMessage {
         }
     }
 
-    fn as_bytes(&self) -> ByteMessage {
-        self.clone()
-    }
-
     fn into_bytes(self) -> ByteMessage {
         self
     }
@@ -176,13 +172,6 @@ impl Message<String> for StringMessage {
         Self {
             key: key.map(|k| String::from_utf8_lossy(k).to_string()),
             value: String::from_utf8_lossy(value).to_string(),
-        }
-    }
-
-    fn as_bytes(&self) -> ByteMessage {
-        ByteMessage {
-            key: self.key.clone().map(|str_val| str_val.into_bytes()),
-            value: self.value.clone().into_bytes(),
         }
     }
 
@@ -274,9 +263,6 @@ pub trait Message<T>: Clone + Debug + PartialEq + From<ByteMessage> + Send + Syn
 
     /// Creates a new [`Message`] from the byte-encoded key and value pair.
     fn from_bytes(key: Option<&[u8]>, value: &[u8]) -> Self;
-
-    /// Translates the [`Message`] contents to serialized byte values.
-    fn as_bytes(&self) -> ByteMessage;
 
     /// Same as [`Message::as_bytes()`], but consumes this instance.
     fn into_bytes(self) -> ByteMessage;

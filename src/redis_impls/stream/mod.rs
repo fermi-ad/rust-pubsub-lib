@@ -109,46 +109,51 @@ fn poll_redis(host: &str, topic: &str) -> (MsgSender, MsgReceiver) {
     let cloned_host = host.to_owned();
     let cloned_sender = sender.clone();
     let cloned_topic = topic.to_owned();
-    tokio::spawn(async move {
-        let mut conn = match get_connection(&cloned_host).await {
-            Ok(conn) => conn,
-            Err(err) => {
-                let _ = cloned_sender.send(Err(err));
-                return;
+    tokio::spawn(do_poll(cloned_host, cloned_sender, cloned_topic));
+    (sender, _channel_lock)
+}
+
+async fn do_poll(
+    cloned_host: String,
+    cloned_sender: Sender<Result<ByteMessage, PubSubError>>,
+    cloned_topic: String,
+) {
+    let mut conn = match get_connection(&cloned_host).await {
+        Ok(conn) => conn,
+        Err(err) => {
+            let _ = cloned_sender.send(Err(err));
+            return;
+        }
+    };
+    let mut latest_id = String::from("$");
+    let opts = StreamReadOptions::default().block(0);
+    while cloned_sender.receiver_count() > 0 {
+        match conn
+            .xread_options::<&str, &str, StreamReadReply>(&[&cloned_topic], &[&latest_id], &opts)
+            .await
+        {
+            Ok(reply) => {
+                let entries = reply.keys.into_iter().flat_map(|stream| stream.ids);
+                for entry in entries {
+                    latest_id = entry.id.clone();
+                    let message = entry_to_message(entry);
+                    let _ = cloned_sender.send(message);
+                }
             }
-        };
-        let mut latest_id = String::from("$");
-        let opts = StreamReadOptions::default().block(0);
-        while cloned_sender.receiver_count() > 0 {
-            match conn
-                .xread_options::<&str, &str, StreamReadReply>(
-                    &[&cloned_topic],
-                    &[&latest_id],
-                    &opts,
-                )
-                .await
-            {
-                Ok(reply) => {
-                    for stream in reply.keys {
-                        for entry in stream.ids {
-                            latest_id = entry.id;
-                            let data: Vec<(Value, Value)> = entry
-                                .map
-                                .into_iter()
-                                .map(|(key, val)| (Value::SimpleString(key), val))
-                                .collect();
-                            let map = Value::Map(data);
-                            let message =
-                                ByteMessage::from_redis_value(map).map_err(PubSubError::from_debug);
-                            let _ = cloned_sender.send(message);
-                        }
-                    }
-                }
-                Err(e) => {
-                    let _ = cloned_sender.send(Err(PubSubError::from(e)));
-                }
+            Err(e) => {
+                let _ = cloned_sender.send(Err(PubSubError::from(e)));
             }
         }
-    });
-    (sender, _channel_lock)
+    }
+}
+
+fn entry_to_message(entry: redis::streams::StreamId) -> Result<ByteMessage, PubSubError> {
+    let data: Vec<(Value, Value)> = entry
+        .map
+        .into_iter()
+        .map(|(key, val)| (Value::SimpleString(key), val))
+        .collect();
+    let map = Value::Map(data);
+    let message = ByteMessage::from_redis_value(map).map_err(PubSubError::from_debug);
+    message
 }
