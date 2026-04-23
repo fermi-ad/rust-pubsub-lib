@@ -2,6 +2,8 @@
 //!
 //! Tests for shared Redis parsing, error conversion, and connection caching behavior.
 
+use std::f64::consts::PI;
+
 use redis::{AsyncTypedCommands, Value};
 use serde_json::json;
 
@@ -118,7 +120,7 @@ fn redis_value_to_json_value_stringifies_number_like_scalars() {
     );
     assert_eq!(
         json!("3.14"),
-        redis_value_to_json_value(&Value::Double(3.14)).unwrap()
+        redis_value_to_json_value(&Value::Double(PI)).unwrap()
     );
 }
 
