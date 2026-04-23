@@ -21,7 +21,7 @@ jobs:
   deploy-docs:
     needs: run-tests-and-coverage
     if: ${{ github.event_name == 'push' }}
-    uses: fermi-ad/.github/.github/workflows/deploy-rust-docs.yaml@v1
+    uses: fermi-ad/.github/.github/workflows/deploy-rust-docs.yaml@6e7454e04e62819b8b2ac97599cf2f77db3c238c
     secrets: inherit 
     permissions:
       contents: write
