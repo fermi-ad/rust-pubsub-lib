@@ -1,51 +1,98 @@
-//! Testing Utilities Module
+//! Testing utilities for Kafka-backed code paths.
 //!
-//! This module contains useful structures for writing tests against this library.
+//! This module wraps a shared [`MockCluster`](rdkafka::mocking::MockCluster) so tests can exercise
+//! Kafka producers, consumers, snapshots, and subscribers without requiring an external broker.
+//!
+//! The shared cluster is global within the test process. Tests should use distinct topic names and
+//! should not assume isolation from messages published by unrelated tests that reuse a topic.
+
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread::spawn;
 
 use rdkafka::mocking::MockCluster;
-use std::{collections::HashSet, sync::LazyLock, thread::spawn};
-use tokio::{
-    sync::{
-        RwLock,
-        mpsc::{self, Sender},
-        oneshot,
-    },
-    task::spawn_blocking,
-};
+use tokio::sync::mpsc::{self, Sender};
+use tokio::sync::{OnceCell, RwLock, oneshot};
 
-/// Global instance of [`MockKafka`] to be used by all test cases.
-/// Utilizes [`LazyLock`] to only instantiate it once it has been referenced for the first time.
-/// All subsequent references will see the same instance.
-static MOCK_CLUSTER: LazyLock<MockKafka> = LazyLock::new(MockKafka::new);
+#[cfg(test)]
+mod tests;
 
-/// The function to drive the [`MockCluster`] process.
-/// Reports the host path to the [`MockKafka`] that kicks this off, then listens for requests to create new topics.
-fn run_cluster(host_sender: oneshot::Sender<String>, mut topic_receiver: mpsc::Receiver<String>) {
-    let mock_cluster = MockCluster::new(3).unwrap();
-    host_sender
-        .send(mock_cluster.bootstrap_servers())
-        .expect("Could not send the host to the MockKafka instance");
-    loop {
-        match topic_receiver.blocking_recv() {
-            Some(topic) => {
-                let _ = mock_cluster.create_topic(&topic, 3, 1);
-            }
-            // When the tests are done, the `MockKafka` will drop its sender, triggering the receiver to resolve to `None`.
-            // We can therefore exit the loop to gracefully terminate this thread.
-            None => break,
+/// A lightweight handle for using the shared test [`MockCluster`](rdkafka::mocking::MockCluster).
+///
+/// ## Isolation caveat
+///
+/// To conserve resources, this structure references a global instance of
+/// [`MockCluster`](rdkafka::mocking::MockCluster). If topic names are reused between test cases,
+/// messages from one test case may become visible to another.
+///
+/// Build tests on independent topics or design them to be agnostic about preexisting data.
+pub struct Harness;
+
+impl Harness {
+    /// Ensures the shared mock cluster is running and pre-creates the requested topics.
+    ///
+    /// Topic creation requests are deduplicated internally, but callers should still prefer unique
+    /// topic names when test isolation matters.
+    pub async fn with_topics(topics: Vec<String>) -> Self {
+        for topic in topics {
+            get_mock_cluster().await.create_topic(topic).await;
         }
+        Harness
+    }
+
+    /// Creates and returns a unique topic name using the provided prefix.
+    ///
+    /// This is the preferred path for tests that need topic isolation while reusing the shared mock
+    /// cluster.
+    pub async fn new_topic(prefix: &str) -> String {
+        get_mock_cluster().await.new_topic(prefix).await
+    }
+
+    /// Returns a harness handle and one freshly created topic name.
+    pub async fn with_new_topic(prefix: &str) -> (Self, String) {
+        let topic = Self::new_topic(prefix).await;
+        (Harness, topic)
+    }
+
+    /// Returns a harness handle and a freshly created topic name for each requested prefix.
+    pub async fn with_new_topics<'a>(
+        prefixes: impl IntoIterator<Item = &'a str>,
+    ) -> (Self, Vec<String>) {
+        let mut topics = Vec::new();
+        for prefix in prefixes {
+            topics.push(Self::new_topic(prefix).await);
+        }
+        (Harness, topics)
+    }
+
+    /// Returns the comma-delimited bootstrap server list for the shared mock cluster.
+    pub async fn host(&self) -> String {
+        get_mock_cluster().await.host()
     }
 }
 
-/// A struct to manage the [`MockCluster`] thread across the test runs.
-/// Maintains a list of the known topics to short-circuit the process of sending a new topic String across the threads.
+/// Global [`MockKafka`] instance shared by all test cases in the process.
+///
+/// [`OnceCell`] ensures the backing mock cluster is started lazily and only once.
+static MOCK_CLUSTER: OnceCell<MockKafka> = OnceCell::const_new();
+
+async fn get_mock_cluster() -> &'static MockKafka {
+    MOCK_CLUSTER.get_or_init(MockKafka::new).await
+}
+
+/// Shared controller for the test-process [`MockCluster`](rdkafka::mocking::MockCluster).
+///
+/// This type owns the worker-thread coordination channel and a cache of topic names already created
+/// in the cluster so repeated requests can be deduplicated cheaply.
 struct MockKafka {
     host: String,
     known_topics: RwLock<HashSet<String>>,
+    next_topic_id: AtomicU64,
     topic_sender: Sender<String>,
 }
+
 impl MockKafka {
-    fn new() -> Self {
+    async fn new() -> Self {
         let (topic_sender, topic_receiver) = mpsc::channel::<String>(1);
         let (host_sender, host_receiver) = oneshot::channel();
 
@@ -54,22 +101,19 @@ impl MockKafka {
         });
 
         let host = host_receiver
-            .blocking_recv()
+            .await
             .expect("Failed to acquire host path for the mock cluster");
 
         MockKafka {
             host,
             known_topics: RwLock::default(),
+            next_topic_id: AtomicU64::new(1),
             topic_sender,
         }
     }
 
     fn host(&self) -> String {
         self.host.clone()
-    }
-
-    fn is_alive(&self) -> bool {
-        true
     }
 
     async fn create_topic(&self, topic: String) {
@@ -86,36 +130,29 @@ impl MockKafka {
             }
         }
     }
+
+    async fn new_topic(&self, prefix: &str) -> String {
+        let topic = format!(
+            "{prefix}-{}",
+            self.next_topic_id.fetch_add(1, Ordering::Relaxed)
+        );
+        self.create_topic(topic.clone()).await;
+        topic
+    }
 }
 
-/// A set of values for running tests against an instance of [`MockCluster`].
+/// Drives the shared [`MockCluster`](rdkafka::mocking::MockCluster) worker thread.
 ///
-/// ## WARNING
-/// To conserve resources, this structure references a global instance of [`MockCluster`].
-/// If topic names are reused between test cases, messages from one test case may become visible to another.
-/// There is no guarantee of consistency on this, so do not build tests in anticipation of specific data from
-/// another test being present.
-///
-/// Corollary: build tests on independent topics or design them to be agnostic
-/// about preexisting data.
-pub struct Harness;
-impl Harness {
-    /// Generates an instance of [`Harness`] with a reference to a global [`MockCluster`] that has been
-    /// prepopulated with the specified topics.
-    pub async fn with_topics(topics: Vec<String>) -> Self {
-        assert!(
-            spawn_blocking(|| MOCK_CLUSTER.is_alive())
-                .await
-                .expect("Failed to start mock cluster")
-        );
-        for topic in topics {
-            MOCK_CLUSTER.create_topic(topic).await;
-        }
-        Harness
-    }
+/// The worker reports the bootstrap servers back to [`MockKafka`] and then listens for topic
+/// creation requests until all senders have been dropped.
+fn run_cluster(host_sender: oneshot::Sender<String>, mut topic_receiver: mpsc::Receiver<String>) {
+    let mock_cluster = MockCluster::new(3).expect("Failed to start Kafka mock cluster");
+    host_sender
+        .send(mock_cluster.bootstrap_servers())
+        .expect("Could not send the host to the MockKafka instance");
 
-    /// Returns the comma-delimited list of addresses generated by the [`MockCluster`].
-    pub fn host(&self) -> String {
-        MOCK_CLUSTER.host()
+    // `blocking_recv` will return `None` when all senders are dropped (i.e., when tests are over).
+    while let Some(topic) = topic_receiver.blocking_recv() {
+        let _ = mock_cluster.create_topic(&topic, 3, 1);
     }
 }

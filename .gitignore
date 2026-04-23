@@ -19,3 +19,7 @@ target
 # Added by cargo
 
 /target
+
+# AI generated files
+.kilo
+plans

@@ -1,42 +1,206 @@
-//! Abstracts the concept of a Publisher/Subscriber resource.
+//! Abstractions for publishing to and subscribing from broker-backed topics.
 //!
-//! This library enhances the testability of code that is part of a pub/sub architecture, and makes
-//! calls to the pub/sub service easier to set up and manage.
+//! `rust-pubsub-lib` provides a backend-agnostic interface for three common messaging operations:
+//! publishing a message, fetching an instantaneous snapshot of a topic, and subscribing to a stream
+//! of messages over time.
+//!
+//! ## Feature flags
+//!
+//! Backends are enabled with Cargo features:
+//!
+//! - `kafka` exposes [`kafka_impl`](crate::kafka_impl).
+//! - `redis-pubsub` exposes Redis pub/sub implementations under [`redis_impls`](crate::redis_impls).
+//! - `redis-stream` exposes Redis Stream implementations under [`redis_impls`](crate::redis_impls).
+//! - `testing-utils` exposes mock broker helpers intended for tests.
+//!
+//! ## Choosing a message type
+//!
+//! Use [`ByteMessage`] when your application already works with serialized bytes. Use
+//! [`StringMessage`] when your application prefers string payloads and can tolerate lossy decoding
+//! for non-UTF-8 input.
+//!
+//! ## Examples
+//!
+//! Constructing a message:
+//!
+//! ```
+//! use rust_pubsub_lib::{Message, StringMessage};
+//!
+//! let message = StringMessage::new(Some("key".to_string()), "value".to_string());
+//! assert_eq!(message.key(), Some("key".to_string()));
+//! assert_eq!(message.value(), "value".to_string());
+//! ```
+//!
+//! Inspecting a message without cloning or extracting it:
+//!
+//! ```
+//! use rust_pubsub_lib::{Message, StringMessage};
+//!
+//! let message = StringMessage::from_value("value".to_string());
+//! assert_eq!(message.value_ref(), "value");
+//! ```
+//!
+//! Cloning data out of a message when ownership is needed:
+//!
+//! ```
+//! use rust_pubsub_lib::{Message, StringMessage};
+//!
+//! let message = StringMessage::new(Some("key".to_string()), "value".to_string());
+//! assert_eq!(message.key(), Some("key".to_string()));
+//! assert_eq!(message.value(), "value".to_string());
+//! ```
+//!
+//! Consuming a message to extract its stored value without an extra clone:
+//!
+//! ```
+//! use rust_pubsub_lib::{Message, StringMessage};
+//!
+//! let message = StringMessage::from_value("value".to_string());
+//! assert_eq!(message.extract_value(), "value".to_string());
+//! ```
+//!
+//! A publisher implementation will typically be constructed from a broker URI and topic name:
+//!
+//! ```ignore
+//! use rust_pubsub_lib::kafka_impl::KafkaPublisher;
+//! use rust_pubsub_lib::{Publisher, StringMessage};
+//!
+//! let publisher = KafkaPublisher::new("localhost:9092".to_string(), "events".to_string());
+//! publisher.publish(StringMessage::from_value("hello".to_string())).await?;
+//! # Ok::<(), rust_pubsub_lib::PubSubError>(())
+//! ```
+//!
+//! A snapshot loads the messages currently available on a topic:
+//!
+//! ```ignore
+//! use rust_pubsub_lib::redis_impls::stream::RedisSnapshot;
+//! use rust_pubsub_lib::{Snapshot, StringMessage};
+//!
+//! let messages = RedisSnapshot::get::<String, StringMessage>(
+//!     "redis://127.0.0.1:6379".to_string(),
+//!     "events".to_string(),
+//! ).await?;
+//! # Ok::<(), rust_pubsub_lib::PubSubError>(())
+//! ```
+//!
+//! A subscriber yields a stream of results over time:
+//!
+//! ```ignore
+//! use rust_pubsub_lib::redis_impls::pubsub::RedisSubscriber;
+//! use rust_pubsub_lib::{StringMessage, Subscriber};
+//! use tokio_stream::StreamExt;
+//!
+//! let mut subscriber = RedisSubscriber::new(
+//!     "redis://127.0.0.1:6379".to_string(),
+//!     "events".to_string(),
+//! );
+//! let mut stream = subscriber.get_stream::<String, StringMessage>().await?;
+//! let _next_message = stream.next().await;
+//! # Ok::<(), rust_pubsub_lib::PubSubError>(())
+//! ```
 
 use std::{
     error::Error,
     fmt::{Debug, Display, Formatter, Result as FmtResult},
 };
+
 use tokio_stream::Stream;
 
+#[cfg(any(feature = "kafka", test))]
 pub mod kafka_impl;
+#[cfg(any(feature = "redis-pubsub", feature = "redis-stream", test))]
+pub mod redis_impls;
+
+#[cfg(any(all(feature = "kafka", feature = "testing-utils"), test))]
+pub use kafka_impl::testing_utils::Harness as KafkaTestHarness;
+#[cfg(any(feature = "kafka", test))]
+pub use kafka_impl::{KafkaPublisher, KafkaSnapshot, KafkaSubscriber};
+#[cfg(any(feature = "redis-pubsub", test))]
+pub use redis_impls::pubsub::{
+    RedisPublisher as RedisPubSubPublisher, RedisSubscriber as RedisPubSubSubscriber,
+};
+#[cfg(any(feature = "redis-stream", test))]
+pub use redis_impls::stream::{
+    RedisPublisher as RedisStreamPublisher, RedisSnapshot as RedisStreamSnapshot,
+    RedisSubscriber as RedisStreamSubscriber,
+};
+#[cfg(any(
+    all(
+        any(feature = "redis-pubsub", feature = "redis-stream"),
+        feature = "testing-utils"
+    ),
+    test
+))]
+pub use redis_impls::testing_utils::TestHarness as RedisTestHarness;
 
 #[cfg(test)]
 mod tests;
 
-/// A message from the pub-sub service.
-/// Contains a key (optional) and a value.
+const CANNED_ERR_MESSAGE: &str = "The PubSub library encountered an error.";
+
+/// A trait describing a message from the pub/sub service.
 ///
-/// Instances may be created with the [`new`](Message::new) method (specifying both key and value)
-/// or the [`from_value`](Message::from_value) method (specifying only the value).
-#[derive(Debug, Clone, PartialEq)]
-pub struct Message {
-    pub key: Option<String>,
-    pub value: String,
-}
-impl Message {
+/// Instances may be created with [`Message::new()`] when both key and value are available,
+/// [`Message::from_value()`] when only the value is relevant, or [`Message::from_bytes()`] when a
+/// backend is decoding raw transport bytes.
+///
+/// The ownership-oriented accessors are intentionally split into three modes:
+///
+/// - use [`Message::key()`] and [`Message::value()`] when you want owned clones of the stored data
+/// - use [`Message::key_ref()`] and [`Message::value_ref()`] when read-only borrowed access is
+///   enough; these borrowed views may be more idiomatic than `&T` for a concrete implementation,
+///   such as `&str` or `&[u8]`
+/// - use [`Message::extract_key()`], [`Message::extract_key_value()`], and
+///   [`Message::extract_value()`] when consuming the message and transferring ownership out of it
+pub trait Message<T>: Clone + Debug + PartialEq + From<ByteMessage> + Send + Sync {
+    /// Borrowed key view tied to the lifetime of `&self`.
+    type KeyRef<'a>
+    where
+        Self: 'a;
+
+    /// Borrowed value view tied to the lifetime of `&self`.
+    type ValueRef<'a>
+    where
+        Self: 'a;
+
     /// Creates a new [`Message`] with the provided key and value.
-    pub fn new(key: Option<String>, value: String) -> Self {
-        Self { key, value }
-    }
+    fn new(key: Option<T>, value: T) -> Self;
 
     /// Creates a new [`Message`] with the provided value _without_ a key.
-    pub fn from_value(value: String) -> Self {
-        Self { key: None, value }
-    }
+    fn from_value(value: T) -> Self;
+
+    /// Creates a new [`Message`] from the byte-encoded key and value pair.
+    fn from_bytes(key: Option<&[u8]>, value: &[u8]) -> Self;
+
+    /// Consumes this [`Message`] and returns only the key, discarding the value.
+    fn extract_key(self) -> Option<T>;
+
+    /// Consumes this [`Message`] and returns the key and value as a tuple.
+    fn extract_key_value(self) -> (Option<T>, T);
+
+    /// Consumes this [`Message`] and returns only the value, discarding the key.
+    fn extract_value(self) -> T;
+
+    /// Converts this message into a [`ByteMessage`], consuming this instance.
+    fn into_bytes(self) -> ByteMessage;
+
+    /// Returns a clone of this message's key, if one is present.
+    fn key(&self) -> Option<T>;
+
+    /// Returns a borrowed view of this message's key, if one is present.
+    fn key_ref(&self) -> Option<Self::KeyRef<'_>>;
+
+    /// Returns a clone of this message's value.
+    fn value(&self) -> T;
+
+    /// Returns a borrowed view of this message's value.
+    fn value_ref(&self) -> Self::ValueRef<'_>;
 }
 
 /// A trait for sending [`Message`]s to a configured topic.
+///
+/// Implementations usually encapsulate connection caching and reconnect behavior behind a backend-
+/// specific concrete type.
 #[async_trait::async_trait]
 pub trait Publisher: Debug {
     /// Configures a [`Publisher`] for the provided host and topic.
@@ -46,61 +210,226 @@ pub trait Publisher: Debug {
 
     /// Sends the provided [`Message`] to the configured topic. If a call to this
     /// method fails, the Publisher will attempt to reconnect on the next call.
-    async fn publish(&self, message: Message) -> Result<(), PubSubError>;
+    async fn publish<T, M: Message<T>>(&self, message: M) -> Result<(), PubSubError>;
 }
 
-/// A trait for retrieving the instantaneous set of [`Message`]s on a topic.
+/// A trait for retrieving a backend-defined point-in-time view of [`Message`]s on a topic.
+///
+/// Snapshot implementations are useful for backends that can enumerate their retained messages
+/// without keeping a long-lived subscription open. The exact inclusion boundary is backend-
+/// specific: some implementations establish an upper bound first and then read up to that bound,
+/// while others directly enumerate the entries retained at read time.
 #[async_trait::async_trait]
 pub trait Snapshot {
     /// Retrieves a snapshot of a message topic.
-    /// This function connects to the message broker,
-    /// loads all [`Message`]s currently on the specified topic, and returns them
-    /// to the caller.
-    async fn get(host: String, topic: String) -> Result<Vec<Message>, PubSubError>;
+    ///
+    /// The returned [`Message`]s represent data retained and visible to the backend during the
+    /// snapshot operation. Exact inclusion boundaries, ordering behavior, and interaction with
+    /// concurrent publishes are backend-specific.
+    async fn get<T, M: Message<T>>(host: String, topic: String) -> Result<Vec<M>, PubSubError>;
 }
 
-/// A trait for subscribing to a message topic. Returns the values as a stream of [`Message`]s for clients to handle.
+/// A trait for subscribing to a message topic.
+///
+/// Implementations return a stream of results so callers can react to new messages over time
+/// without coupling themselves to a specific broker client library.
+#[async_trait::async_trait]
 pub trait Subscriber: Debug {
-    /// Generates a new [`Subscriber`] for the provided host and topic.
-    /// A new thread will be started and run in the background to poll for
-    /// [`Message`]s. The thread will terminate when this subscriber is dropped.
+    /// Configures a [`Subscriber`] for the provided host and topic.
+    ///
+    /// Whether construction immediately starts background work is backend-specific. Some
+    /// implementations defer connection setup until [`Subscriber::get_stream()`] is first called.
     fn new(host: String, topic: String) -> Self
     where
         Self: Sized;
 
-    /// Streams [`Message`]s that appear on the subscribed topic. If an interruption occurs, the Subscriber will
-    /// attempt to reconnect on its own.
-    fn get_stream(
+    /// Streams [`Message`]s that appear on the subscribed topic.
+    ///
+    /// If an interruption occurs, the [`Subscriber`] attempts to reconnect on its own.
+    async fn get_stream<T, M: Message<T>>(
         &mut self,
-    ) -> Result<impl Stream<Item = Result<Message, PubSubError>> + Unpin + Send, PubSubError>;
+    ) -> Result<impl Stream<Item = Result<M, PubSubError>> + Unpin + Send, PubSubError>;
 }
 
-const CANNED_ERR_MESSAGE: &str = "The PubSub library encountered an error.";
-
-/// An implementation of [`Error`] to return when pub/sub operations do not succeed.
-/// This will always contain a canned error message, with the underlying error recorded if possible.
-/// Consumers of this library should be careful not to expose sensitive data to users.
-#[derive(Debug)]
-pub struct PubSubError {
-    message: String,
-    cause: Option<Box<dyn Error + Send>>,
+/// A [`Message`] containing already-serialized key and value bytes.
+///
+/// The key is optional because some brokers or calling patterns only care about a message payload.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ByteMessage {
+    key: Option<Vec<u8>>,
+    value: Vec<u8>,
 }
-impl Default for PubSubError {
-    fn default() -> Self {
+
+impl Message<Vec<u8>> for ByteMessage {
+    type KeyRef<'a> = &'a [u8];
+    type ValueRef<'a> = &'a [u8];
+
+    fn new(key: Option<Vec<u8>>, value: Vec<u8>) -> Self {
+        Self { key, value }
+    }
+
+    fn from_value(value: Vec<u8>) -> Self {
+        Self { key: None, value }
+    }
+
+    fn from_bytes(key: Option<&[u8]>, value: &[u8]) -> Self {
         Self {
-            message: CANNED_ERR_MESSAGE.to_string(),
-            cause: None,
+            key: key.map(|arr| arr.to_vec()),
+            value: value.to_vec(),
+        }
+    }
+
+    fn extract_key(self) -> Option<Vec<u8>> {
+        self.key
+    }
+
+    fn extract_key_value(self) -> (Option<Vec<u8>>, Vec<u8>) {
+        (self.key, self.value)
+    }
+
+    fn extract_value(self) -> Vec<u8> {
+        self.value
+    }
+
+    fn into_bytes(self) -> ByteMessage {
+        self
+    }
+
+    fn key(&self) -> Option<Vec<u8>> {
+        self.key.clone()
+    }
+
+    fn key_ref(&self) -> Option<Self::KeyRef<'_>> {
+        self.key.as_deref()
+    }
+
+    fn value(&self) -> Vec<u8> {
+        self.value.clone()
+    }
+
+    fn value_ref(&self) -> Self::ValueRef<'_> {
+        self.value.as_slice()
+    }
+}
+
+/// A [`Message`] represented as UTF-8-oriented strings.
+///
+/// The key remains optional to match brokers that do not require one. When converting from raw
+/// bytes via [`StringMessage::from_bytes()`], invalid UTF-8 is decoded lossily with replacement
+/// characters rather than returning an error.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StringMessage {
+    key: Option<String>,
+    value: String,
+}
+
+impl Message<String> for StringMessage {
+    type KeyRef<'a> = &'a str;
+    type ValueRef<'a> = &'a str;
+
+    fn new(key: Option<String>, value: String) -> Self {
+        Self { key, value }
+    }
+
+    fn from_value(value: String) -> Self {
+        Self { key: None, value }
+    }
+
+    fn from_bytes(key: Option<&[u8]>, value: &[u8]) -> Self {
+        Self {
+            key: key.map(|k| String::from_utf8_lossy(k).to_string()),
+            value: String::from_utf8_lossy(value).to_string(),
+        }
+    }
+
+    fn extract_key(self) -> Option<String> {
+        self.key
+    }
+
+    fn extract_key_value(self) -> (Option<String>, String) {
+        (self.key, self.value)
+    }
+
+    fn extract_value(self) -> String {
+        self.value
+    }
+
+    fn into_bytes(self) -> ByteMessage {
+        ByteMessage {
+            key: self.key.map(|k| k.into_bytes()),
+            value: self.value.into_bytes(),
+        }
+    }
+
+    fn key(&self) -> Option<String> {
+        self.key.clone()
+    }
+
+    fn key_ref(&self) -> Option<Self::KeyRef<'_>> {
+        self.key.as_deref()
+    }
+
+    fn value(&self) -> String {
+        self.value.clone()
+    }
+
+    fn value_ref(&self) -> Self::ValueRef<'_> {
+        self.value.as_str()
+    }
+}
+
+impl From<ByteMessage> for StringMessage {
+    fn from(bytes: ByteMessage) -> Self {
+        let (byte_key, byte_val) = bytes.extract_key_value();
+        Self {
+            key: byte_key.map(|k| String::from_utf8_lossy(&k).to_string()),
+            value: String::from_utf8_lossy(&byte_val).to_string(),
         }
     }
 }
-impl Display for PubSubError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        let cause_message = if let Some(err) = &self.cause {
-            format!("\n Cause: {err}")
-        } else {
-            String::new()
-        };
-        write!(f, "{}{}", self.message, cause_message)
+
+/// An [`Error`] returned when a pub/sub operation does not succeed.
+///
+/// User-facing formatting via [`Display`] is intentionally stable and generic.
+/// Additional diagnostic context may be captured internally and exposed through
+/// [`Debug`] output for logging and troubleshooting.
+///
+/// Use `format!("{err}")` for messages shown to users.
+/// Use `format!("{err:?}")` when recording diagnostic detail in logs.
+#[derive(Clone, Default)]
+pub struct PubSubError {
+    cause: Option<String>,
+}
+
+impl PubSubError {
+    /// Creates a [`PubSubError`] from a debuggable error value.
+    ///
+    /// The captured value is stored as diagnostic context and is visible through
+    /// [`Debug`] formatting, while [`Display`] remains generic.
+    pub fn from_debug<E: Debug>(err: E) -> Self {
+        Self {
+            cause: Some(format!("{err:?}")),
+        }
+    }
+
+    /// Returns the captured diagnostic cause message, if one was stored.
+    pub fn cause_message(&self) -> Option<&str> {
+        self.cause.as_deref()
     }
 }
+
+impl Debug for PubSubError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        f.debug_struct("PubSubError")
+            .field("cause", &self.cause)
+            .finish()
+    }
+}
+
+impl Display for PubSubError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        write!(f, "{CANNED_ERR_MESSAGE}")
+    }
+}
+
 impl Error for PubSubError {}

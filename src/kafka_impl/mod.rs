@@ -1,87 +1,61 @@
-//! Kafka Implementations Module
+//! Kafka-backed implementations of the crate's core messaging traits.
 //!
-//! Contains implementations of the public traits in this library, configured for interactions with a Kafka instance.
+//! This module provides Kafka implementations for [`Publisher`](crate::Publisher),
+//! [`Snapshot`](crate::Snapshot), and [`Subscriber`](crate::Subscriber).
+//!
+//! The Kafka subscriber path shares a cached stream per host/topic pair within the process so that
+//! multiple subscribers can reuse the same background Kafka consumer task. Idle cached producers and
+//! streams are eventually cleaned up by an internal reaper task.
 
-use crate::{Message, PubSubError, Publisher, Snapshot, Subscriber};
-use rdkafka::{
-    ClientConfig, Message as RdMessage,
-    consumer::{Consumer, StreamConsumer},
-    error::{KafkaError, KafkaResult},
-    message::BorrowedMessage,
-    producer::{FutureProducer, FutureRecord},
-    types::RDKafkaErrorCode,
-};
+use std::collections::HashMap;
+use std::fmt::{Debug, Formatter, Result as FmtResult};
+use std::time::Duration;
+
+use rdkafka::consumer::{Consumer, StreamConsumer};
+use rdkafka::error::KafkaError;
+use rdkafka::message::BorrowedMessage;
+use rdkafka::producer::FutureRecord;
+use rdkafka::types::RDKafkaErrorCode;
+use rdkafka::{ClientConfig, Message as RdMessage};
 use rust_env_var_lib::env_var;
-use std::{
-    collections::HashMap,
-    fmt::{Debug, Formatter, Result as FmtResult},
-    sync::LazyLock,
-    time::Duration,
-};
-use tokio::sync::RwLock;
+use tokio::time::timeout;
+use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{Stream, StreamExt};
 use uuid::Uuid;
+
+use crate::{ByteMessage, Message, PubSubError, Publisher, Snapshot, Subscriber};
 
 #[cfg(any(feature = "testing-utils", test))]
 pub mod testing_utils;
 
+mod cache;
+mod stream;
+
 #[cfg(test)]
 mod tests;
 
-/// [`FutureProducer`] is intended to be a one-per-host construct, shared by all parts of the application that need to produce on that host.
-/// As such, we build a static map of the producers to be shared by all instances of [`KafkaPublisher`] that get requested for the same host.  
-static PRODUCER_MAP: LazyLock<RwLock<HashMap<String, FutureProducer>>> =
-    LazyLock::new(RwLock::default);
+const SNAPSHOT_MESSAGE_TIMEOUT: Duration = Duration::from_secs(5);
 
-impl From<KafkaError> for PubSubError {
-    fn from(value: KafkaError) -> Self {
-        PubSubError {
-            cause: Some(Box::new(value)),
-            ..Default::default()
-        }
-    }
-}
-
-/// Implementation of the [`Publisher`] trait for Kafka connections.
+/// Kafka implementation of [`Publisher`](crate::Publisher).
+///
+/// Producers are cached per Kafka bootstrap host so repeated publishes can reuse an existing
+/// connection instead of constructing a fresh producer every time.
 pub struct KafkaPublisher {
     host: String,
     topic: String,
 }
-impl KafkaPublisher {
-    async fn get_connection(&self) -> Result<FutureProducer, PubSubError> {
-        let naive_read = PRODUCER_MAP.read().await.get(&self.host).cloned();
-        match naive_read {
-            Some(producer) => Ok(producer),
-            None => {
-                let mut lock = PRODUCER_MAP.write().await;
-                match lock.get(&self.host).cloned() {
-                    Some(producer) => Ok(producer),
-                    None => {
-                        let default = ClientConfig::new()
-                            .set("bootstrap.servers", &self.host)
-                            .create()?;
-                        let producer = lock
-                            .entry(self.host.clone())
-                            .insert_entry(default)
-                            .get()
-                            .clone();
-                        Ok(producer)
-                    }
-                }
-            }
-        }
-    }
-}
+
 #[async_trait::async_trait]
 impl Publisher for KafkaPublisher {
     fn new(host: String, topic: String) -> Self {
         Self { host, topic }
     }
 
-    async fn publish(&self, message: Message) -> Result<(), PubSubError> {
-        let producer = self.get_connection().await?;
-        let mut record = FutureRecord::to(&self.topic).payload(&message.value);
-        if let Some(key) = &message.key {
+    async fn publish<T, M: Message<T>>(&self, message: M) -> Result<(), PubSubError> {
+        let producer = cache::get_kafka_producer(self.host.clone()).await?;
+        let bytes = message.into_bytes();
+        let mut record = FutureRecord::to(&self.topic).payload(&bytes.value);
+        if let Some(key) = &bytes.key {
             record = record.key(key);
         }
         match producer.send(record, get_kafka_timeout_val()).await {
@@ -90,6 +64,7 @@ impl Publisher for KafkaPublisher {
         }
     }
 }
+
 impl Debug for KafkaPublisher {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         f.debug_struct("KafkaPublisher")
@@ -99,9 +74,18 @@ impl Debug for KafkaPublisher {
     }
 }
 
-/// Implementation of the [`Snapshot`] trait for Kafka connections.
+/// Kafka implementation of [`Snapshot`](crate::Snapshot).
+///
+/// A snapshot creates a short-lived consumer, records the current high watermark for each
+/// partition, and reads until those offsets have been observed. This means the snapshot includes
+/// messages visible up to the discovered per-partition bounds at the time offset discovery
+/// completes.
+///
+/// Messages produced after watermark discovery are not guaranteed to appear. Returned ordering
+/// reflects Kafka partition consumption rather than a single global topic order.
 #[derive(Debug)]
 pub struct KafkaSnapshot;
+
 impl KafkaSnapshot {
     fn configure_consumer(host: &str, topic: &str) -> Result<StreamConsumer, PubSubError> {
         let consumer = ClientConfig::new()
@@ -138,115 +122,95 @@ impl KafkaSnapshot {
         }
     }
 }
+
 #[async_trait::async_trait]
 impl Snapshot for KafkaSnapshot {
-    async fn get(host: String, topic: String) -> Result<Vec<Message>, PubSubError> {
+    async fn get<T, M: Message<T>>(host: String, topic: String) -> Result<Vec<M>, PubSubError> {
         let consumer = Self::configure_consumer(&host, &topic)?;
         let mut offsets = Self::determine_max_offsets(&consumer, &topic)?;
 
         let mut stream = consumer.stream();
-        let mut data: Vec<Message> = Vec::new();
-        while !offsets.is_empty()
-            && let Some(msg_res) = stream.next().await
-        {
+        let mut data: Vec<M> = Vec::new();
+        while !offsets.is_empty() {
+            let item = timeout(SNAPSHOT_MESSAGE_TIMEOUT, stream.next())
+                .await
+                .map_err(PubSubError::from_debug)?;
+            let msg_res = item.ok_or_else(|| {
+                PubSubError::from(KafkaError::MessageConsumption(
+                    RDKafkaErrorCode::PartitionEOF,
+                ))
+            })?;
+
             let msg = msg_res?;
             offsets.retain(|k, v| *k != msg.partition() || *v > msg.offset());
-
             data.push(convert_to_message(msg)?);
         }
         Ok(data)
     }
 }
 
-/// Implementation of the [`Subscriber`] trait for Kafka connections.
+/// Kafka implementation of [`Subscriber`](crate::Subscriber).
+///
+/// Subscribers reuse a shared [`KafkaStream`](stream::KafkaStream) per host/topic pair. This avoids
+/// spinning up duplicate consumers when multiple callers subscribe to the same Kafka topic inside a
+/// single process.
+///
+/// Constructing a subscriber is side-effect free; the shared background consumer runtime is started
+/// lazily by the first call to [`Subscriber::get_stream()`](crate::Subscriber::get_stream).
 pub struct KafkaSubscriber {
-    consumer: Option<StreamConsumer>,
     host: String,
     topic: String,
-    uuid: Uuid,
 }
+
 impl KafkaSubscriber {
-    fn check_connection(&mut self) -> Result<(), PubSubError> {
-        if self.consumer.is_none() {
-            self.configure_consumer()?;
-        }
-        Ok(())
-    }
-
-    fn configure_consumer(&mut self) -> Result<(), PubSubError> {
-        #[cfg(not(any(feature = "testing-utils", test)))]
-        let consumer = ClientConfig::new()
-            .set("bootstrap.servers", &self.host)
-            .set("group.id", self.uuid.as_hyphenated().to_string())
-            .create::<StreamConsumer>()?;
-
-        // During testing, the low latency of the mock Kafka cluster means that messages are often produced on the broker before the
-        // consumer is registered. Setting the auto offset reset to "earliest" ensures we see all messages during the test.
-        #[cfg(any(feature = "testing-utils", test))]
-        let consumer = ClientConfig::new()
-            .set("bootstrap.servers", &self.host)
-            .set("group.id", self.uuid.as_hyphenated().to_string())
-            .set("auto.offset.reset", "earliest")
-            .create::<StreamConsumer>()?;
-        consumer.subscribe(&[&self.topic])?;
-        self.consumer = Some(consumer);
-        Ok(())
-    }
-
-    fn convert_stream(initial: KafkaResult<BorrowedMessage>) -> Result<Message, PubSubError> {
-        convert_to_message(initial?)
+    fn convert_stream<T, M: Message<T>>(
+        stream: BroadcastStream<ByteMessage>,
+    ) -> impl Stream<Item = Result<M, PubSubError>> + Unpin + Send {
+        stream.map(|incoming| match incoming {
+            Ok(msg) => Ok(M::from_bytes(msg.key.as_deref(), &msg.value)),
+            Err(err) => Err(PubSubError::from_debug(err)),
+        })
     }
 }
+
+#[async_trait::async_trait]
 impl Subscriber for KafkaSubscriber {
     fn new(host: String, topic: String) -> Self {
-        Self {
-            consumer: None,
-            host,
-            topic,
-            uuid: Uuid::new_v4(),
-        }
+        Self { host, topic }
     }
 
-    fn get_stream(
+    async fn get_stream<T, M: Message<T>>(
         &mut self,
-    ) -> Result<impl Stream<Item = Result<Message, PubSubError>> + Unpin + Send, PubSubError> {
-        self.check_connection()?;
-        Ok(self
-            .consumer
-            .as_ref()
-            .unwrap()
-            .stream()
-            .map(Self::convert_stream))
+    ) -> Result<impl Stream<Item = Result<M, PubSubError>> + Unpin + Send, PubSubError> {
+        Ok(Self::convert_stream(
+            cache::get_kafka_stream(self.host.clone(), self.topic.clone()).await,
+        ))
     }
 }
+
 impl Debug for KafkaSubscriber {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        let consumer_text = if self.consumer.is_none() {
-            "None".to_string()
-        } else {
-            "Some(StreamConsumer)".to_string()
-        };
         f.debug_struct("KafkaSubscriber")
-            .field("consumer", &consumer_text)
             .field("host", &self.host)
             .field("topic", &self.topic)
-            .field("uuid", &self.uuid.as_hyphenated().to_string())
             .finish()
     }
 }
 
-fn convert_to_message(incoming: BorrowedMessage) -> Result<Message, PubSubError> {
-    let value_bytes = incoming.payload().ok_or_else(PubSubError::default)?;
-    let value = String::from_utf8_lossy(value_bytes).to_string();
-
-    let key = incoming
-        .key()
-        .map(|bytes| String::from_utf8_lossy(bytes).to_string());
-
-    Ok(Message { key, value })
+impl From<KafkaError> for PubSubError {
+    fn from(value: KafkaError) -> Self {
+        PubSubError::from_debug(value)
+    }
 }
 
 fn get_kafka_timeout_val() -> Duration {
     let secs = env_var::get("KAFKA_CONNECTION_SECONDS").or(1);
     Duration::from_secs(secs)
+}
+
+fn convert_to_message<T, M: Message<T>>(incoming: BorrowedMessage) -> Result<M, PubSubError> {
+    let value = incoming.payload().ok_or_else(PubSubError::default)?;
+    let key = incoming.key();
+
+    Ok(M::from_bytes(key, value))
 }
