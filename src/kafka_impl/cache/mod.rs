@@ -1,16 +1,46 @@
-use crate::{ByteMessage, PubSubError, kafka_impl::stream::KafkaStream};
-use rdkafka::{ClientConfig, producer::FutureProducer};
+//! Shared Kafka producer and subscriber-stream caches.
+//!
+//! This module centralizes per-process reuse for Kafka infrastructure:
+//! producer instances are cached by bootstrap host, while subscriber fan-out runtimes are cached by
+//! `(host, topic)` pairs. A background reaper removes idle entries after a grace period.
+
 use std::{
     collections::HashMap,
     sync::LazyLock,
     time::{Duration, Instant},
 };
+
+use rdkafka::{ClientConfig, producer::FutureProducer};
 use tokio::{sync::RwLock, time::sleep};
 use tokio_stream::wrappers::BroadcastStream;
+
+use crate::{ByteMessage, PubSubError, kafka_impl::stream::KafkaStream};
 
 #[cfg(test)]
 mod tests;
 
+/// Interval between idle-cache cleanup passes.
+const REAPER_INTERVAL: Duration = Duration::from_secs(10);
+/// Idle duration after which cached entries are evicted.
+const EVICT_AFTER_IDLE: Duration = Duration::from_secs(60);
+
+/// Shared map of one Kafka [`FutureProducer`] per bootstrap host.
+type ProducerCache = RwLock<HashMap<String, CacheEntry<FutureProducer>>>;
+/// Cache key identifying a shared subscriber runtime by host and topic.
+type ConsumerCacheKey = (String, String);
+/// Shared map of Kafka subscriber runtimes indexed by [`ConsumerCacheKey`].
+type ConsumerCache = RwLock<HashMap<ConsumerCacheKey, CacheEntry<KafkaStream>>>;
+
+/// Kafka producers are cached by bootstrap host across the process.
+static PRODUCER_MAP: LazyLock<ProducerCache> = LazyLock::new(RwLock::default);
+/// Kafka subscriber streams are cached by `(host, topic)` across the process.
+static CONSUMER_MAP: LazyLock<ConsumerCache> = LazyLock::new(|| RwLock::new(HashMap::new()));
+/// Lazily starts the shared background reaper the first time a cache is used.
+static REAPER_STARTED: LazyLock<()> = LazyLock::new(|| {
+    tokio::spawn(reap_unused_streams());
+});
+
+/// Returns the shared Kafka subscriber stream for a host/topic pair, creating it on first use.
 pub async fn get_kafka_stream(host: String, topic: String) -> BroadcastStream<ByteMessage> {
     let key = (host.clone(), topic.clone());
     if let Some(stream) = CONSUMER_MAP
@@ -21,6 +51,7 @@ pub async fn get_kafka_stream(host: String, topic: String) -> BroadcastStream<By
     {
         return stream;
     }
+
     let mut lock = CONSUMER_MAP.write().await;
     lock.entry(key)
         .or_insert_with(|| {
@@ -34,6 +65,7 @@ pub async fn get_kafka_stream(host: String, topic: String) -> BroadcastStream<By
         .get_stream()
 }
 
+/// Returns the cached Kafka producer for a bootstrap host, creating it on first use.
 pub async fn get_kafka_producer(host: String) -> Result<FutureProducer, PubSubError> {
     let mut lock = PRODUCER_MAP.write().await;
     if let Some(entry) = lock.get_mut(&host) {
@@ -50,23 +82,12 @@ pub async fn get_kafka_producer(host: String) -> Result<FutureProducer, PubSubEr
                 last_used: Instant::now(),
             },
         );
+        // Force one-time lazy initialization of the shared reaper so producer-only workloads still
+        // clean up idle cached producers even if no subscriber stream is ever requested.
+        *REAPER_STARTED;
         Ok(default)
     }
 }
-
-static PRODUCER_MAP: LazyLock<ProducerCache> = LazyLock::new(RwLock::default);
-/// Kafka subscriber streams are shared by host/topic across the process.
-static CONSUMER_MAP: LazyLock<ConsumerCache> = LazyLock::new(|| RwLock::new(HashMap::new()));
-static REAPER_STARTED: LazyLock<()> = LazyLock::new(|| {
-    tokio::spawn(reap_unused_streams());
-});
-const REAPER_INTERVAL: Duration = Duration::from_secs(10);
-const EVICT_AFTER_IDLE: Duration = Duration::from_secs(60);
-/// [`FutureProducer`] is intended to be a one-per-host construct, shared by all parts of the application that need to produce on that host.
-/// As such, we build a static map of the producers to be shared by all instances of [`KafkaPublisher`] that get requested for the same host.
-type ProducerCache = RwLock<HashMap<String, CacheEntry<FutureProducer>>>;
-type ConsumerCacheKey = (String, String);
-type ConsumerCache = RwLock<HashMap<ConsumerCacheKey, CacheEntry<KafkaStream>>>;
 
 #[derive(Debug)]
 struct CacheEntry<T> {
@@ -74,6 +95,7 @@ struct CacheEntry<T> {
     last_used: Instant,
 }
 
+/// Periodically removes idle cached producers and subscriber runtimes.
 async fn reap_unused_streams() {
     loop {
         sleep(REAPER_INTERVAL).await;

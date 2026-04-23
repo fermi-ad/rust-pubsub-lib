@@ -1,8 +1,14 @@
-use super::*;
+//! Redis testing utility tests.
+//!
+//! These tests cover RESP parsing, mock-server command handling, stream state management, and
+//! shutdown behavior for the in-process Redis test harness.
+
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{broadcast, oneshot};
 use tokio::time::{Duration, timeout};
+
+use super::*;
 
 #[test]
 fn parse_bulk_token_reads_complete_token() {
@@ -19,10 +25,15 @@ fn parse_bulk_token_returns_none_for_incomplete_input() {
 #[test]
 fn parse_one_resp_array_parses_complete_command() {
     let input = "*3\r\n$7\r\nPUBLISH\r\n$5\r\ntopic\r\n$7\r\npayload\r\nrest";
-    let parsed = parse_one_resp_array(input).unwrap();
-    assert_eq!("PUBLISH", parsed.0.0);
-    assert_eq!(vec!["topic".to_string(), "payload".to_string()], parsed.0.1);
-    assert_eq!("rest", parsed.1);
+    let (command, response) = parse_one_resp_array(input).unwrap();
+    assert_eq!(
+        Command::Publish {
+            topic: "topic".to_string(),
+            payload: "payload".to_string()
+        },
+        command
+    );
+    assert_eq!("rest", response);
 }
 
 #[test]
@@ -34,8 +45,13 @@ fn parse_one_resp_array_returns_none_for_partial_input() {
 #[test]
 fn parse_resp_command_parses_inline_command() {
     let parsed = parse_resp_command("publish topic payload").unwrap();
-    assert_eq!("PUBLISH", parsed.0);
-    assert_eq!(vec!["topic".to_string(), "payload".to_string()], parsed.1);
+    assert_eq!(
+        Command::Publish {
+            topic: "topic".to_string(),
+            payload: "payload".to_string()
+        },
+        parsed
+    );
 }
 
 #[test]
@@ -45,15 +61,21 @@ fn parse_resp_commands_parses_mixed_inline_and_resp_input() {
         "*3\r\n$7\r\nPUBLISH\r\n$5\r\ntopic\r\n$7\r\npayload\r\n"
     );
     let (commands, consumed) = parse_resp_commands(input);
+    let [ping_command, publish_command]: [Command; 2] = commands.try_into().unwrap();
 
-    assert_eq!(2, commands.len());
-    assert_eq!(("PING".to_string(), vec![]), commands[0]);
     assert_eq!(
-        (
-            "PUBLISH".to_string(),
-            vec!["topic".to_string(), "payload".to_string()]
-        ),
-        commands[1]
+        Command::Unknown {
+            name: "PING".to_string(),
+            args: vec![],
+        },
+        ping_command
+    );
+    assert_eq!(
+        Command::Publish {
+            topic: "topic".to_string(),
+            payload: "payload".to_string(),
+        },
+        publish_command
     );
     assert_eq!(input.len(), consumed);
 }
@@ -69,6 +91,7 @@ async fn read_stream_dispatches_client_publish_subscribe_and_default() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let (message_sender, mut message_receiver) = broadcast::channel(8);
+    let (connection_sender, _) = broadcast::channel(8);
     let pubsub_messages = HashMap::from([("topic".to_string(), vec!["queued".to_string()])]);
 
     let server = tokio::spawn(async move {
@@ -82,6 +105,7 @@ async fn read_stream_dispatches_client_publish_subscribe_and_default() {
             &mut pending,
             &mut buffer,
             &message_sender,
+            &connection_sender,
             &pubsub_messages,
             &stream_state,
         )
@@ -109,6 +133,7 @@ async fn read_stream_dispatches_client_publish_subscribe_and_default() {
     assert!(response.contains(":1\r\n"));
     assert!(response.contains("subscribe"));
     assert!(response.contains("message"));
+    assert!(response.contains("queued"));
     assert_eq!("payload", message_receiver.recv().await.unwrap());
 
     server.await.unwrap();
@@ -119,6 +144,7 @@ async fn read_stream_supports_xadd_xrange_and_xread() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let (message_sender, mut message_receiver) = broadcast::channel(8);
+    let (connection_sender, _) = broadcast::channel(8);
     let stream_state = Arc::new(StreamState::default());
 
     let server = tokio::spawn({
@@ -133,6 +159,7 @@ async fn read_stream_supports_xadd_xrange_and_xread() {
                 &mut pending,
                 &mut buffer,
                 &message_sender,
+                &connection_sender,
                 &HashMap::new(),
                 &stream_state,
             )
@@ -164,15 +191,94 @@ async fn read_stream_supports_xadd_xrange_and_xread() {
 }
 
 #[tokio::test]
+async fn read_stream_limits_subscribe_replay_to_requested_topics() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (message_sender, _) = broadcast::channel(8);
+    let (connection_sender, _) = broadcast::channel(8);
+    let pubsub_messages = HashMap::from([
+        ("topic".to_string(), vec!["queued".to_string()]),
+        ("other-topic".to_string(), vec!["ignored".to_string()]),
+    ]);
+
+    let server = tokio::spawn(async move {
+        let (mut server_stream, _) = listener.accept().await.unwrap();
+        let mut pending = String::new();
+        let mut buffer = [0; 8192];
+        let stream_state = Arc::new(StreamState::default());
+
+        read_stream(
+            &mut server_stream,
+            &mut pending,
+            &mut buffer,
+            &message_sender,
+            &connection_sender,
+            &pubsub_messages,
+            &stream_state,
+        )
+        .await
+        .unwrap();
+    });
+
+    let mut client = TcpStream::connect(addr).await.unwrap();
+    let payload = "*2\r\n$9\r\nSUBSCRIBE\r\n$5\r\ntopic\r\n";
+    client.write_all(payload.as_bytes()).await.unwrap();
+
+    let mut response = vec![0_u8; 512];
+    let bytes_read = timeout(Duration::from_secs(1), client.read(&mut response))
+        .await
+        .unwrap()
+        .unwrap();
+    let response = String::from_utf8_lossy(&response[..bytes_read]).to_string();
+
+    assert!(response.contains("queued"));
+    assert!(!response.contains("ignored"));
+
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn stream_state_keeps_entries_per_topic() {
+    let state = StreamState::default();
+    let first_id = state.push("topic-a", "first".to_string()).await;
+    let second_id = state.push("topic-b", "second".to_string()).await;
+
+    assert_eq!("1-0", first_id);
+    assert_eq!("1-0", second_id);
+    assert_eq!(
+        vec![StreamEntry {
+            id: "1-0".to_string(),
+            payload: "first".to_string(),
+        }],
+        state.all("topic-a").await
+    );
+    assert_eq!(
+        vec![StreamEntry {
+            id: "1-0".to_string(),
+            payload: "second".to_string(),
+        }],
+        state.all("topic-b").await
+    );
+}
+
+#[tokio::test]
+async fn harness_message_checks_use_timeout_bounded_waits() {
+    let mut harness = TestHarness::new(None).await;
+    assert!(harness.check_for_message("missing-message").await.is_err());
+}
+
+#[tokio::test]
 async fn listen_for_requests_stops_after_shutdown() {
     let shutdown_token = CancellationToken::new();
     let (host_sender, host_receiver) = oneshot::channel();
     let (message_sender, _) = broadcast::channel(8);
+    let (connection_sender, _) = broadcast::channel(8);
 
     let server = tokio::spawn(listen_for_requests(
         shutdown_token.clone(),
         host_sender,
         message_sender,
+        connection_sender,
         HashMap::new(),
     ));
 

@@ -1,10 +1,16 @@
 //! Redis Stream implementation tests.
+//!
+//! These tests cover publishing, snapshots, subscriber fan-out, cache reuse, idle eviction, and
+//! stream-entry conversion behavior for the Redis Stream backend.
+
+use std::time::Duration;
+
+use serde_json::json;
+use tokio::time::{sleep, timeout};
+use tokio_stream::StreamExt;
 
 use super::*;
 use crate::{Message, RedisTestHarness, StringMessage};
-use std::time::Duration;
-use tokio::time::{sleep, timeout};
-use tokio_stream::StreamExt;
 
 #[tokio::test]
 async fn redis_stream_publish_records_payload_on_mock_server() {
@@ -58,7 +64,7 @@ async fn redis_stream_snapshot_returns_existing_entries() {
     assert!(
         snapshot
             .iter()
-            .any(|msg| msg.value().contains("snapshot payload"))
+            .any(|msg| msg.value_ref().contains("snapshot payload"))
     );
 }
 
@@ -85,7 +91,7 @@ async fn redis_stream_subscriber_receives_messages() {
         .unwrap()
         .unwrap()
         .unwrap();
-    assert!(message.value().contains("live payload"));
+    assert!(message.value_ref().contains("live payload"));
 }
 
 #[tokio::test]
@@ -117,8 +123,77 @@ async fn redis_stream_fans_out_to_multiple_subscribers() {
         .unwrap()
         .unwrap();
 
-    assert!(first_msg.value().contains("fanout payload"));
-    assert!(second_msg.value().contains("fanout payload"));
+    assert!(first_msg.value_ref().contains("fanout payload"));
+    assert!(second_msg.value_ref().contains("fanout payload"));
+}
+
+#[tokio::test]
+async fn redis_stream_reuses_one_cached_stream_per_host_and_topic() {
+    let host = "not-a-valid-redis-uri".to_string();
+    let topic = "shared-topic-reuse".to_string();
+
+    let first = cache::get_redis_stream(host.clone(), topic.clone()).await;
+    let second = cache::get_redis_stream(host.clone(), topic.clone()).await;
+
+    drop(first);
+    drop(second);
+
+    let mut subscriber = RedisSubscriber::new(host, topic);
+    let mut stream = subscriber
+        .get_stream::<String, StringMessage>()
+        .await
+        .unwrap();
+
+    let err = timeout(Duration::from_secs(5), stream.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .expect_err("expected the reused cached runtime to forward its connection failure");
+
+    assert!(
+        err.cause_message()
+            .is_some_and(|cause| cause.contains("Redis URL did not parse"))
+    );
+}
+
+#[tokio::test]
+async fn redis_stream_subscriber_new_does_not_start_work_eagerly() {
+    let host = "redis://lazy-host-never-started".to_string();
+    let topic = "lazy-topic-never-started".to_string();
+
+    let _subscriber = RedisSubscriber::new(host, topic);
+
+    sleep(Duration::from_millis(300)).await;
+}
+
+#[tokio::test]
+async fn redis_stream_cached_stream_is_evicted_after_going_idle() {
+    let host = "not-a-valid-redis-uri".to_string();
+    let topic = "idle-topic-eviction".to_string();
+
+    {
+        let stream = cache::get_redis_stream(host.clone(), topic.clone()).await;
+        drop(stream);
+    }
+
+    sleep(Duration::from_secs(4)).await;
+
+    let mut subscriber = RedisSubscriber::new(host, topic);
+    let mut stream = subscriber
+        .get_stream::<String, StringMessage>()
+        .await
+        .unwrap();
+
+    let err = timeout(Duration::from_secs(5), stream.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .expect_err("expected a fresh runtime to report connection failure after idle eviction");
+
+    assert!(
+        err.cause_message()
+            .is_some_and(|cause| cause.contains("Redis URL did not parse"))
+    );
 }
 
 #[tokio::test]
@@ -136,5 +211,54 @@ async fn redis_stream_subscriber_reports_connection_failure() {
         .unwrap()
         .expect_err("expected a propagated connection error");
 
-    assert!(format!("{err}").contains("The PubSub library encountered an error."));
+    assert!(
+        err.cause_message()
+            .is_some_and(|cause| cause.contains("Redis URL did not parse"))
+    );
+}
+
+#[test]
+fn stream_entry_to_json_bytes_preserves_nested_shapes() {
+    let entry = StreamId {
+        id: "1-0".to_string(),
+        map: vec![(
+            "outer".to_string(),
+            Value::Map(vec![(
+                Value::SimpleString("inner".to_string()),
+                Value::Array(vec![
+                    Value::SimpleString("leaf".to_string()),
+                    Value::Int(42),
+                ]),
+            )]),
+        )]
+        .into_iter()
+        .collect(),
+        milliseconds_elapsed_from_delivery: None,
+        delivered_count: None,
+    };
+
+    let payload = stream_entry_to_json_bytes(&entry).unwrap();
+    let decoded: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+
+    assert_eq!(json!({"outer": {"inner": ["leaf", "42"]}}), decoded);
+}
+
+#[test]
+fn stream_entry_to_byte_message_materializes_json_bytes() {
+    let entry = StreamId {
+        id: "1-0".to_string(),
+        map: vec![(
+            "data".to_string(),
+            Value::SimpleString("payload".to_string()),
+        )]
+        .into_iter()
+        .collect(),
+        milliseconds_elapsed_from_delivery: None,
+        delivered_count: None,
+    };
+
+    let message = stream_entry_to_byte_message(&entry).unwrap();
+    let decoded: serde_json::Value = serde_json::from_slice(message.value_ref()).unwrap();
+
+    assert_eq!(json!({"data": "payload"}), decoded);
 }

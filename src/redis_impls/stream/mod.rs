@@ -5,24 +5,36 @@
 //! Special considerations:
 //! - Redis assigns stream entry identifiers itself, so a source message key is not preserved by
 //!   [`RedisPublisher`](crate::redis_impls::stream::RedisPublisher).
-//! - [`RedisSubscriber`](crate::redis_impls::stream::RedisSubscriber) polls Redis in a background
-//!   task and fans results out through a broadcast channel.
+//! - [`RedisSubscriber`](crate::redis_impls::stream::RedisSubscriber) is a lightweight handle; Redis
+//!   stream subscribers for the same host/topic pair share a cached background `XREAD` poller.
+//! - Constructing [`RedisSubscriber`](crate::redis_impls::stream::RedisSubscriber) does not start
+//!   background work. Polling begins when [`Subscriber::get_stream()`](crate::Subscriber::get_stream)
+//!   first requests the shared runtime from the cache.
+//! - Each stream returned by [`Subscriber::get_stream()`](crate::Subscriber::get_stream) receives
+//!   future messages from the shared broadcast fan-out channel for that host/topic pair.
 //! - [`RedisSnapshot`](crate::redis_impls::stream::RedisSnapshot) reads the currently retained
 //!   entries from the stream at the time the request is made.
+//! - Retained stream field/value structures are materialized into [`ByteMessage`](crate::ByteMessage)
+//!   payloads by recursively normalizing Redis values into JSON-compatible data and serializing that
+//!   normalized structure into JSON bytes.
 
-use crate::redis_impls::get_connection;
-use crate::{ByteMessage, Message, PubSubError, Publisher, Snapshot, Subscriber};
-use redis::streams::{StreamReadOptions, StreamReadReply};
-use redis::{AsyncCommands, FromRedisValue, Value};
 use std::fmt::Debug;
-use tokio::sync::broadcast::{self, Receiver, Sender};
-use tokio_stream::wrappers::BroadcastStream;
+
+use redis::streams::{StreamId, StreamRangeReply};
+use redis::{AsyncCommands, FromRedisValue, Value};
 use tokio_stream::{Stream, StreamExt};
+
+use crate::redis_impls::{get_connection, redis_value_to_byte_message};
+use crate::{ByteMessage, Message, PubSubError, Publisher, Snapshot, Subscriber};
+
+mod cache;
+mod runtime;
 
 #[cfg(test)]
 mod tests;
 
-/// Redis-backed [`Publisher`](crate::Publisher) implementation that writes to Redis Streams via `XADD`.
+/// Redis-backed [`Publisher`](crate::Publisher) implementation that writes to Redis Streams via
+/// `XADD`.
 ///
 /// The message key is not preserved because Redis assigns its own stream entry identifier.
 #[derive(Debug)]
@@ -30,6 +42,7 @@ pub struct RedisPublisher {
     host: String,
     topic: String,
 }
+
 #[async_trait::async_trait]
 impl Publisher for RedisPublisher {
     fn new(host: String, topic: String) -> Self {
@@ -40,58 +53,79 @@ impl Publisher for RedisPublisher {
         let mut conn = get_connection(&self.host).await?;
         let bytes = message.into_bytes();
         Ok(conn
-            .xadd(&self.topic, "*", &[("data", &bytes.value)])
+            .xadd(&self.topic, "*", &[("data", bytes.value_ref())])
             .await?)
     }
 }
 
-/// Redis-backed [`Snapshot`](crate::Snapshot) implementation that reads the current stream contents.
+/// Redis-backed [`Snapshot`](crate::Snapshot) implementation that reads the entries currently
+/// retained in a Redis Stream.
 ///
-/// The snapshot converts each retained stream entry into a [`ByteMessage`](crate::ByteMessage) and
-/// then into the requested message type.
+/// This snapshot is based on the stream contents returned by `XRANGE` at read time. Entries
+/// trimmed before the read are not included. Entries added concurrently may or may not appear,
+/// depending on Redis command timing.
+///
+/// Each retained stream entry is converted into a [`ByteMessage`](crate::ByteMessage) by
+/// recursively normalizing the Redis field/value structure into JSON-compatible data and then
+/// serializing that normalized structure into JSON bytes before conversion into the requested
+/// message type.
 pub struct RedisSnapshot;
+
 #[async_trait::async_trait]
 impl Snapshot for RedisSnapshot {
     async fn get<T, M: Message<T>>(host: String, topic: String) -> Result<Vec<M>, PubSubError> {
         let mut conn = get_connection(&host).await?;
-        let vals: Vec<ByteMessage> = conn.xrange_all(topic).await?;
+        let raw_reply: Value = conn.xrange_all(topic).await?;
+        let reply = StreamRangeReply::from_redis_value(raw_reply)?;
+        let vals = reply
+            .ids
+            .iter()
+            .map(stream_entry_to_byte_message)
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(vals.into_iter().map(M::from).collect())
     }
 }
 
-/// Redis-backed [`Subscriber`](crate::Subscriber) implementation that polls a Redis Stream and broadcasts updates.
+/// Redis-backed [`Subscriber`](crate::Subscriber) implementation.
 ///
-/// A background task started by [`RedisSubscriber::new()`](crate::redis_impls::stream::RedisSubscriber::new)
-/// blocks on `XREAD`, forwards decoded entries through a broadcast channel, and stops once no
-/// receivers remain.
+/// Subscribers reuse a shared cached background poller per host/topic pair.
+/// Constructing a subscriber is side-effect free; the shared background runtime is started lazily
+/// by the first call to [`Subscriber::get_stream()`](crate::Subscriber::get_stream).
+///
+/// Each call to [`Subscriber::get_stream()`](crate::Subscriber::get_stream) subscribes to the
+/// shared broadcast channel for the matching host/topic pair and receives future messages from
+/// that point onward.
 pub struct RedisSubscriber {
-    _channel_lock: Receiver<Result<ByteMessage, PubSubError>>,
     host: String,
-    sender: Sender<Result<ByteMessage, PubSubError>>,
     topic: String,
 }
+
+impl RedisSubscriber {
+    fn convert_stream<T, M: Message<T>>(
+        stream: tokio_stream::wrappers::BroadcastStream<Result<ByteMessage, PubSubError>>,
+    ) -> impl Stream<Item = Result<M, PubSubError>> + Unpin + Send {
+        stream.map(|incoming| {
+            incoming
+                .map_err(PubSubError::from_debug)
+                .and_then(|response| response.map(M::from))
+        })
+    }
+}
+
 #[async_trait::async_trait]
 impl Subscriber for RedisSubscriber {
     fn new(host: String, topic: String) -> Self {
-        let (sender, _channel_lock) = poll_redis(&host, &topic);
-        RedisSubscriber {
-            _channel_lock,
-            host,
-            sender,
-            topic,
-        }
+        RedisSubscriber { host, topic }
     }
 
     async fn get_stream<T, M: Message<T>>(
         &mut self,
     ) -> Result<impl Stream<Item = Result<M, PubSubError>> + Unpin + Send, PubSubError> {
-        Ok(BroadcastStream::new(self.sender.subscribe()).map(|stream| {
-            stream
-                .map_err(PubSubError::from_display)
-                .and_then(|response| response.map(M::from))
-        }))
+        let stream = cache::get_redis_stream(self.host.clone(), self.topic.clone()).await;
+        Ok(Self::convert_stream(stream))
     }
 }
+
 impl Debug for RedisSubscriber {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RedisSubscriber")
@@ -101,59 +135,22 @@ impl Debug for RedisSubscriber {
     }
 }
 
-type MsgSender = Sender<Result<ByteMessage, PubSubError>>;
-type MsgReceiver = Receiver<Result<ByteMessage, PubSubError>>;
-
-fn poll_redis(host: &str, topic: &str) -> (MsgSender, MsgReceiver) {
-    let (sender, _channel_lock) = broadcast::channel(10);
-    let cloned_host = host.to_owned();
-    let cloned_sender = sender.clone();
-    let cloned_topic = topic.to_owned();
-    tokio::spawn(do_poll(cloned_host, cloned_sender, cloned_topic));
-    (sender, _channel_lock)
-}
-
-async fn do_poll(
-    cloned_host: String,
-    cloned_sender: Sender<Result<ByteMessage, PubSubError>>,
-    cloned_topic: String,
-) {
-    let mut conn = match get_connection(&cloned_host).await {
-        Ok(conn) => conn,
-        Err(err) => {
-            let _ = cloned_sender.send(Err(err));
-            return;
-        }
-    };
-    let mut latest_id = String::from("$");
-    let opts = StreamReadOptions::default().block(0);
-    while cloned_sender.receiver_count() > 0 {
-        match conn
-            .xread_options::<&str, &str, StreamReadReply>(&[&cloned_topic], &[&latest_id], &opts)
-            .await
-        {
-            Ok(reply) => {
-                let entries = reply.keys.into_iter().flat_map(|stream| stream.ids);
-                for entry in entries {
-                    latest_id = entry.id.clone();
-                    let message = entry_to_message(entry);
-                    let _ = cloned_sender.send(message);
-                }
-            }
-            Err(e) => {
-                let _ = cloned_sender.send(Err(PubSubError::from(e)));
-            }
-        }
-    }
-}
-
-fn entry_to_message(entry: redis::streams::StreamId) -> Result<ByteMessage, PubSubError> {
+fn stream_entry_to_redis_value(entry: &StreamId) -> Value {
     let data: Vec<(Value, Value)> = entry
         .map
-        .into_iter()
-        .map(|(key, val)| (Value::SimpleString(key), val))
+        .iter()
+        .map(|(key, value)| (Value::SimpleString(key.clone()), value.clone()))
         .collect();
-    let map = Value::Map(data);
-    let message = ByteMessage::from_redis_value(map).map_err(PubSubError::from_debug);
-    message
+    Value::Map(data)
+}
+
+fn stream_entry_to_byte_message(entry: &StreamId) -> Result<ByteMessage, PubSubError> {
+    let redis_value = stream_entry_to_redis_value(entry);
+    redis_value_to_byte_message(&redis_value).map_err(PubSubError::from)
+}
+
+#[cfg(test)]
+fn stream_entry_to_json_bytes(entry: &StreamId) -> Result<Vec<u8>, PubSubError> {
+    let redis_value = stream_entry_to_redis_value(entry);
+    crate::redis_impls::redis_value_to_json_bytes(&redis_value).map_err(PubSubError::from)
 }

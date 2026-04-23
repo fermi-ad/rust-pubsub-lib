@@ -1,9 +1,13 @@
-//! The tests for the Kafka Implementation Module
+//! Kafka implementation tests.
+//!
+//! These tests cover formatting, error conversion, publishing, subscription, and snapshot behavior
+//! for the Kafka-backed implementations.
 
-use super::*;
-use crate::{KafkaTestHarness, StringMessage};
 use tokio::time::{Duration, timeout};
 use tokio_stream::StreamExt;
+
+use super::*;
+use crate::{KafkaPublisher, KafkaTestHarness, StringMessage};
 
 #[test]
 fn format_kafka_publisher() {
@@ -28,7 +32,7 @@ fn format_kafka_subscriber() {
 
 #[test]
 fn from_kafka_error() {
-    let expected = PubSubError::from_display(KafkaError::Canceled);
+    let expected = PubSubError::from_debug(KafkaError::Canceled);
     let result = PubSubError::from(KafkaError::Canceled);
     assert_eq!(format!("{expected}"), format!("{result}"));
 }
@@ -78,4 +82,17 @@ async fn kafka_snapshot_empty_topic_returns_empty_without_hanging() {
     .unwrap();
 
     assert!(result.is_empty());
+}
+
+#[tokio::test]
+async fn kafka_producer_creation_starts_reaper_path() {
+    let topic = String::from("producer_reaper_topic");
+    let test_harness = KafkaTestHarness::with_topics(vec![topic.clone()]).await;
+    let host = test_harness.host().await;
+
+    let publisher = KafkaPublisher::new(host, topic);
+    publisher
+        .publish(StringMessage::from_value("testing".to_string()))
+        .await
+        .unwrap();
 }

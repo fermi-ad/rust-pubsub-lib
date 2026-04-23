@@ -1,13 +1,15 @@
-//! Redis PubSub implementation tests.
+//! Redis pub/sub implementation tests.
 //!
-//! Tests for the Redis pub/sub implementations of the public traits in this library.
+//! These tests cover publishing and subscription behavior for the Redis native pub/sub backend.
+
+use std::collections::HashMap;
+use std::time::Duration;
+
+use tokio::time::timeout;
+use tokio_stream::StreamExt;
 
 use super::*;
 use crate::{Message, RedisTestHarness, StringMessage};
-use std::collections::HashMap;
-use std::time::Duration;
-use tokio::time::timeout;
-use tokio_stream::StreamExt;
 
 #[tokio::test]
 async fn test_publish() {
@@ -44,33 +46,33 @@ async fn test_publish_ignores_message_key() {
 }
 
 #[tokio::test]
-async fn test_subscribe() {
+async fn test_subscribe_plain_string_payload_round_trips() {
     let context = RedisTestHarness::new(Some(HashMap::from([(
         "test-topic".to_string(),
         vec!["Hello, Redis PubSub!".to_string()],
     )])))
     .await;
     let mut subscriber = RedisSubscriber::new(context.get_host(), "test-topic".to_string());
-    let message = StringMessage::from_value("\"Hello, Redis PubSub!\"".to_string());
-    assert!(
-        timeout(
-            Duration::from_secs(5),
-            subscriber
-                .get_stream::<String, StringMessage>()
-                .await
-                .unwrap()
-                .take(1)
-                .all(|item| item.is_ok_and(|msg| msg == message))
-        )
-        .await
-        .unwrap()
-    );
+
+    let message = timeout(
+        Duration::from_secs(5),
+        subscriber
+            .get_stream::<String, StringMessage>()
+            .await
+            .unwrap()
+            .take(1)
+            .all(|item| item.is_ok_and(|msg| msg.value_ref() == "Hello, Redis PubSub!")),
+    )
+    .await
+    .unwrap();
+
+    assert!(message);
 }
 
 #[tokio::test]
 async fn test_subscribe_receives_multiple_messages_in_order() {
     let context = RedisTestHarness::new(Some(HashMap::from([(
-        "test-topic".to_string(),
+        "ordered-topic".to_string(),
         vec![
             "first".to_string(),
             "second".to_string(),
@@ -78,33 +80,54 @@ async fn test_subscribe_receives_multiple_messages_in_order() {
         ],
     )])))
     .await;
-    let mut subscriber = RedisSubscriber::new(context.get_host(), "test-topic".to_string());
+    let mut subscriber = RedisSubscriber::new(context.get_host(), "ordered-topic".to_string());
 
-    let future = async {
+    let received = timeout(
+        Duration::from_secs(5),
         subscriber
             .get_stream::<String, StringMessage>()
             .await
             .unwrap()
             .take(3)
-            .collect::<Vec<Result<StringMessage, PubSubError>>>()
-            .await
-    };
-    let received = timeout(Duration::from_secs(5), future).await.unwrap();
+            .collect::<Vec<Result<StringMessage, PubSubError>>>(),
+    )
+    .await
+    .unwrap();
 
     let messages = received
         .into_iter()
         .map(Result::unwrap)
-        .map(|msg| msg.value())
+        .map(StringMessage::extract_value)
         .collect::<Vec<_>>();
 
-    assert_eq!(
-        vec![
-            "\"first\"".to_string(),
-            "\"second\"".to_string(),
-            "\"third\"".to_string()
-        ],
-        messages
-    );
+    assert_eq!(vec!["first", "second", "third"], messages);
+}
+
+#[tokio::test]
+async fn test_subscribe_json_looking_payload_remains_plain_text() {
+    let json_text = "{\"hello\":[1,2,3]}".to_string();
+    let context = RedisTestHarness::new(Some(HashMap::from([(
+        "json-payload-topic".to_string(),
+        vec![json_text.clone()],
+    )])))
+    .await;
+    let mut subscriber = RedisSubscriber::new(context.get_host(), "json-payload-topic".to_string());
+
+    let message = timeout(
+        Duration::from_secs(5),
+        subscriber
+            .get_stream::<String, StringMessage>()
+            .await
+            .unwrap()
+            .take(1)
+            .next(),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(json_text, message.extract_value());
 }
 
 #[tokio::test]

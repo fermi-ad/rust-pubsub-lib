@@ -8,12 +8,13 @@
 //! is primarily intended for use by the Kafka subscriber implementation in [`super`](super).
 //! Consumers should treat its behavior as backend infrastructure rather than as a first-choice API.
 
-use crate::{ByteMessage, Message};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
 use rdkafka::ClientConfig;
 use rdkafka::consumer::{Consumer, ConsumerContext, MessageStream, StreamConsumer};
 use rdkafka::error::KafkaError;
 use rdkafka::message::{BorrowedMessage, Message as RdMessage};
-use std::time::Duration;
 use tokio::spawn;
 use tokio::sync::broadcast::{Sender, channel};
 use tokio::time::sleep;
@@ -23,18 +24,55 @@ use tokio_util::sync::CancellationToken;
 use tracing::error;
 use uuid::Uuid;
 
+use crate::{ByteMessage, Message};
+
+/// Maximum exponential-backoff delay applied after connection-establishment failures.
+const MAX_WAIT_TIME: Duration = Duration::from_secs(300);
+
 /// Shared Kafka message stream for one host/topic pair.
 ///
-/// Creating a [`KafkaStream`](crate::kafka_impl::stream::KafkaStream) spawns a background task that
-/// reconnects as needed and forwards messages to any listeners returned by
-/// [`KafkaStream::get_stream()`](crate::kafka_impl::stream::KafkaStream::get_stream).
+/// Creating a [`KafkaStream`](crate::kafka_impl::stream::KafkaStream) does not immediately start
+/// broker work. The first call to
+/// [`KafkaStream::get_stream()`](crate::kafka_impl::stream::KafkaStream::get_stream) creates a
+/// receiver and lazily starts a shared background task that reconnects as needed and forwards
+/// messages to all active listeners.
 #[derive(Debug)]
 pub struct KafkaStream {
     cancel_token: CancellationToken,
+    host: String,
+    topic: String,
     sender: Sender<ByteMessage>,
+    started: AtomicBool,
 }
 
 impl KafkaStream {
+    /// Creates a new shared Kafka stream for a host/topic pair.
+    ///
+    /// The returned instance is a lightweight handle. Background polling is deferred until the first
+    /// call to [`KafkaStream::get_stream()`](crate::kafka_impl::stream::KafkaStream::get_stream).
+    pub fn new(host: String, topic: String) -> Self {
+        let (sender, _) = channel(100);
+        let cancel_token = CancellationToken::new();
+
+        Self {
+            cancel_token,
+            host,
+            topic,
+            sender,
+            started: AtomicBool::new(false),
+        }
+    }
+
+    /// Returns a new broadcast-backed message stream for this Kafka topic.
+    ///
+    /// Each caller receives its own broadcast receiver and therefore sees messages published after
+    /// the receiver is created. The first call lazily starts the shared background worker.
+    pub fn get_stream(&self) -> BroadcastStream<ByteMessage> {
+        let stream = BroadcastStream::new(self.sender.subscribe());
+        self.ensure_started();
+        stream
+    }
+
     /// Returns the number of active broadcast receivers currently attached to this stream.
     ///
     /// This is used internally to decide when an idle cached stream can be evicted.
@@ -42,35 +80,19 @@ impl KafkaStream {
         self.sender.receiver_count()
     }
 
-    /// Creates a new shared Kafka stream for a host/topic pair.
-    ///
-    /// The returned instance starts a background task immediately. That task attempts to connect,
-    /// subscribe, and keep forwarding messages until this value is dropped.
-    pub fn new(host: String, topic: String) -> Self {
-        let (sender, _) = channel(100);
-        let remote_sender = sender.clone();
-
-        let cancel_token = CancellationToken::new();
-
-        spawn(start_stream(
-            host,
-            topic,
-            remote_sender,
-            cancel_token.child_token(),
-        ));
-
-        Self {
-            cancel_token,
-            sender,
+    fn ensure_started(&self) {
+        if self
+            .started
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            spawn(start_stream(
+                self.host.clone(),
+                self.topic.clone(),
+                self.sender.clone(),
+                self.cancel_token.child_token(),
+            ));
         }
-    }
-
-    /// Returns a new broadcast-backed message stream for this Kafka topic.
-    ///
-    /// Each caller receives its own broadcast receiver and therefore sees messages published after
-    /// the receiver is created.
-    pub fn get_stream(&self) -> BroadcastStream<ByteMessage> {
-        BroadcastStream::new(self.sender.subscribe())
     }
 }
 
@@ -80,8 +102,6 @@ impl Drop for KafkaStream {
     }
 }
 
-const MAX_WAIT_TIME: Duration = Duration::from_secs(300);
-
 async fn start_stream(
     host: String,
     topic: String,
@@ -90,6 +110,7 @@ async fn start_stream(
 ) {
     let stream_id = Uuid::new_v4().as_hyphenated().to_string();
     let mut error_backoff_time = Duration::from_secs(1);
+
     while !cancel_token.is_cancelled() {
         let mut builder = ClientConfig::new();
         builder.set("bootstrap.servers", &host);
@@ -128,12 +149,6 @@ async fn monitor_stream<C: ConsumerContext>(
     }
 }
 
-fn convert_to_message(incoming: &BorrowedMessage) -> Option<ByteMessage> {
-    incoming
-        .payload()
-        .map(|value_bytes| ByteMessage::from_bytes(incoming.key(), value_bytes))
-}
-
 async fn handle_connection_err(err: KafkaError, mut wait_time: Duration) -> Duration {
     error!("{err:?}");
     sleep(wait_time).await;
@@ -144,4 +159,10 @@ async fn handle_connection_err(err: KafkaError, mut wait_time: Duration) -> Dura
     } else {
         wait_time
     }
+}
+
+fn convert_to_message(incoming: &BorrowedMessage) -> Option<ByteMessage> {
+    incoming
+        .payload()
+        .map(|value_bytes| ByteMessage::from_bytes(incoming.key(), value_bytes))
 }
