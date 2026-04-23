@@ -119,7 +119,7 @@ fn redis_value_to_json_value_stringifies_number_like_scalars() {
         redis_value_to_json_value(&Value::Int(42)).unwrap()
     );
     assert_eq!(
-        json!("3.14"),
+        json!("3.141592653589793"),
         redis_value_to_json_value(&Value::Double(PI)).unwrap()
     );
 }
