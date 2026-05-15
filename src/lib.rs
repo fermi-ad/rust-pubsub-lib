@@ -19,6 +19,10 @@
 //! [`StringMessage`] when your application prefers string payloads and can tolerate lossy decoding
 //! for non-UTF-8 input.
 //!
+//! The [`Message`] trait has two associated types: [`Message::Key`] for the key type and
+//! [`Message::Value`] for the value type. Both built-in message types use the same type for key
+//! and value, but custom implementations may use different types for each.
+//!
 //! ## Examples
 //!
 //! Constructing a message:
@@ -63,7 +67,7 @@
 //!
 //! ```ignore
 //! use rust_pubsub_lib::kafka_impl::KafkaPublisher;
-//! use rust_pubsub_lib::{Publisher, StringMessage};
+//! use rust_pubsub_lib::{Message, Publisher, StringMessage};
 //!
 //! let publisher = KafkaPublisher::new("localhost:9092".to_string(), "events".to_string());
 //! publisher.publish(StringMessage::from_value("hello".to_string())).await?;
@@ -76,7 +80,7 @@
 //! use rust_pubsub_lib::redis_impls::stream::RedisSnapshot;
 //! use rust_pubsub_lib::{Snapshot, StringMessage};
 //!
-//! let messages = RedisSnapshot::get::<String, StringMessage>(
+//! let messages = RedisSnapshot::get::<StringMessage>(
 //!     "redis://127.0.0.1:6379".to_string(),
 //!     "events".to_string(),
 //! ).await?;
@@ -94,7 +98,7 @@
 //!     "redis://127.0.0.1:6379".to_string(),
 //!     "events".to_string(),
 //! );
-//! let mut stream = subscriber.get_stream::<String, StringMessage>().await?;
+//! let mut stream = subscriber.get_stream::<StringMessage>().await?;
 //! let _next_message = stream.next().await;
 //! # Ok::<(), rust_pubsub_lib::PubSubError>(())
 //! ```
@@ -108,22 +112,27 @@ use tokio_stream::Stream;
 
 #[cfg(any(feature = "kafka", test))]
 pub mod kafka_impl;
+
 #[cfg(any(feature = "redis-pubsub", feature = "redis-stream", test))]
 pub mod redis_impls;
 
 #[cfg(any(all(feature = "kafka", feature = "testing-utils"), test))]
 pub use kafka_impl::testing_utils::Harness as KafkaTestHarness;
+
 #[cfg(any(feature = "kafka", test))]
 pub use kafka_impl::{KafkaPublisher, KafkaSnapshot, KafkaSubscriber};
+
 #[cfg(any(feature = "redis-pubsub", test))]
 pub use redis_impls::pubsub::{
     RedisPublisher as RedisPubSubPublisher, RedisSubscriber as RedisPubSubSubscriber,
 };
+
 #[cfg(any(feature = "redis-stream", test))]
 pub use redis_impls::stream::{
-    RedisPublisher as RedisStreamPublisher, RedisSnapshot as RedisStreamSnapshot,
+    MapMessage, RedisPublisher as RedisStreamPublisher, RedisSnapshot as RedisStreamSnapshot,
     RedisSubscriber as RedisStreamSubscriber,
 };
+
 #[cfg(any(
     all(
         any(feature = "redis-pubsub", feature = "redis-stream"),
@@ -144,15 +153,26 @@ const CANNED_ERR_MESSAGE: &str = "The PubSub library encountered an error.";
 /// [`Message::from_value()`] when only the value is relevant, or [`Message::from_bytes()`] when a
 /// backend is decoding raw transport bytes.
 ///
+/// The trait is generic over two independent type parameters:
+/// - `K` — the owned key type (e.g. `String`, `Vec<u8>`, or a custom domain type)
+/// - `V` — the owned value type (e.g. `String`, `Vec<u8>`, or a custom domain type)
+///
+/// Both built-in message types ([`ByteMessage`] and [`StringMessage`]) use the same type for key
+/// and value, but custom implementations may freely choose different types for each.
+///
 /// The ownership-oriented accessors are intentionally split into three modes:
 ///
 /// - use [`Message::key()`] and [`Message::value()`] when you want owned clones of the stored data
 /// - use [`Message::key_ref()`] and [`Message::value_ref()`] when read-only borrowed access is
-///   enough; these borrowed views may be more idiomatic than `&T` for a concrete implementation,
-///   such as `&str` or `&[u8]`
+///   enough; these borrowed views may be more idiomatic than `&K`/`&V` for a concrete
+///   implementation, such as `&str` or `&[u8]`
 /// - use [`Message::extract_key()`], [`Message::extract_key_value()`], and
 ///   [`Message::extract_value()`] when consuming the message and transferring ownership out of it
-pub trait Message<T>: Clone + Debug + PartialEq + From<ByteMessage> + Send + Sync {
+pub trait Message: Clone + Debug + PartialEq + From<ByteMessage> + Send + Sync {
+    /// The type of the message's Key, if one is present.
+    type Key: Clone + Debug;
+    /// The type of the message's Value.
+    type Value: Clone + Debug;
     /// Borrowed key view tied to the lifetime of `&self`.
     type KeyRef<'a>
     where
@@ -164,34 +184,34 @@ pub trait Message<T>: Clone + Debug + PartialEq + From<ByteMessage> + Send + Syn
         Self: 'a;
 
     /// Creates a new [`Message`] with the provided key and value.
-    fn new(key: Option<T>, value: T) -> Self;
+    fn new(key: Option<Self::Key>, value: Self::Value) -> Self;
 
     /// Creates a new [`Message`] with the provided value _without_ a key.
-    fn from_value(value: T) -> Self;
+    fn from_value(value: Self::Value) -> Self;
 
     /// Creates a new [`Message`] from the byte-encoded key and value pair.
     fn from_bytes(key: Option<&[u8]>, value: &[u8]) -> Self;
 
     /// Consumes this [`Message`] and returns only the key, discarding the value.
-    fn extract_key(self) -> Option<T>;
+    fn extract_key(self) -> Option<Self::Key>;
 
     /// Consumes this [`Message`] and returns the key and value as a tuple.
-    fn extract_key_value(self) -> (Option<T>, T);
+    fn extract_key_value(self) -> (Option<Self::Key>, Self::Value);
 
     /// Consumes this [`Message`] and returns only the value, discarding the key.
-    fn extract_value(self) -> T;
+    fn extract_value(self) -> Self::Value;
 
     /// Converts this message into a [`ByteMessage`], consuming this instance.
     fn into_bytes(self) -> ByteMessage;
 
     /// Returns a clone of this message's key, if one is present.
-    fn key(&self) -> Option<T>;
+    fn key(&self) -> Option<Self::Key>;
 
     /// Returns a borrowed view of this message's key, if one is present.
     fn key_ref(&self) -> Option<Self::KeyRef<'_>>;
 
     /// Returns a clone of this message's value.
-    fn value(&self) -> T;
+    fn value(&self) -> Self::Value;
 
     /// Returns a borrowed view of this message's value.
     fn value_ref(&self) -> Self::ValueRef<'_>;
@@ -210,7 +230,7 @@ pub trait Publisher: Debug {
 
     /// Sends the provided [`Message`] to the configured topic. If a call to this
     /// method fails, the Publisher will attempt to reconnect on the next call.
-    async fn publish<T, M: Message<T>>(&self, message: M) -> Result<(), PubSubError>;
+    async fn publish<M: Message>(&self, message: M) -> Result<(), PubSubError>;
 }
 
 /// A trait for retrieving a backend-defined point-in-time view of [`Message`]s on a topic.
@@ -226,7 +246,7 @@ pub trait Snapshot {
     /// The returned [`Message`]s represent data retained and visible to the backend during the
     /// snapshot operation. Exact inclusion boundaries, ordering behavior, and interaction with
     /// concurrent publishes are backend-specific.
-    async fn get<T, M: Message<T>>(host: String, topic: String) -> Result<Vec<M>, PubSubError>;
+    async fn get<M: Message>(host: String, topic: String) -> Result<Vec<M>, PubSubError>;
 }
 
 /// A trait for subscribing to a message topic.
@@ -246,7 +266,7 @@ pub trait Subscriber: Debug {
     /// Streams [`Message`]s that appear on the subscribed topic.
     ///
     /// If an interruption occurs, the [`Subscriber`] attempts to reconnect on its own.
-    async fn get_stream<T, M: Message<T>>(
+    async fn get_stream<M: Message>(
         &mut self,
     ) -> Result<impl Stream<Item = Result<M, PubSubError>> + Unpin + Send, PubSubError>;
 }
@@ -260,7 +280,9 @@ pub struct ByteMessage {
     value: Vec<u8>,
 }
 
-impl Message<Vec<u8>> for ByteMessage {
+impl Message for ByteMessage {
+    type Key = Vec<u8>;
+    type Value = Vec<u8>;
     type KeyRef<'a> = &'a [u8];
     type ValueRef<'a> = &'a [u8];
 
@@ -323,7 +345,9 @@ pub struct StringMessage {
     value: String,
 }
 
-impl Message<String> for StringMessage {
+impl Message for StringMessage {
+    type Key = String;
+    type Value = String;
     type KeyRef<'a> = &'a str;
     type ValueRef<'a> = &'a str;
 

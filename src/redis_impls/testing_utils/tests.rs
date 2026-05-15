@@ -240,22 +240,26 @@ async fn read_stream_limits_subscribe_replay_to_requested_topics() {
 #[tokio::test]
 async fn stream_state_keeps_entries_per_topic() {
     let state = StreamState::default();
-    let first_id = state.push("topic-a", "first".to_string()).await;
-    let second_id = state.push("topic-b", "second".to_string()).await;
+    let first_id = state
+        .push("topic-a", vec![("data".to_string(), "first".to_string())])
+        .await;
+    let second_id = state
+        .push("topic-b", vec![("data".to_string(), "second".to_string())])
+        .await;
 
     assert_eq!("1-0", first_id);
     assert_eq!("1-0", second_id);
     assert_eq!(
         vec![StreamEntry {
             id: "1-0".to_string(),
-            payload: "first".to_string(),
+            fields: vec![("data".to_string(), "first".to_string())],
         }],
         state.all("topic-a").await
     );
     assert_eq!(
         vec![StreamEntry {
             id: "1-0".to_string(),
-            payload: "second".to_string(),
+            fields: vec![("data".to_string(), "second".to_string())],
         }],
         state.all("topic-b").await
     );

@@ -28,10 +28,6 @@ type ConsumerCacheKey = (String, String);
 type ConsumerCache = RwLock<HashMap<ConsumerCacheKey, CacheEntry<RedisStream>>>;
 
 /// Redis Stream runtimes are cached by `(host, topic)` across the process.
-#[cfg(test)]
-pub(super) static CONSUMER_MAP: LazyLock<ConsumerCache> =
-    LazyLock::new(|| RwLock::new(HashMap::new()));
-#[cfg(not(test))]
 static CONSUMER_MAP: LazyLock<ConsumerCache> = LazyLock::new(|| RwLock::new(HashMap::new()));
 /// Lazily starts the shared background reaper the first time the cache is used.
 static REAPER_STARTED: LazyLock<()> = LazyLock::new(|| {
@@ -67,8 +63,8 @@ pub(crate) async fn get_redis_stream(
 }
 
 #[derive(Debug)]
-pub(super) struct CacheEntry<T> {
-    pub(super) data: T,
+struct CacheEntry<T> {
+    data: T,
     last_used: Instant,
 }
 

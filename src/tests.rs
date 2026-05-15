@@ -25,7 +25,9 @@ impl From<ByteMessage> for SliceBackedMessage {
     }
 }
 
-impl Message<Vec<u8>> for SliceBackedMessage {
+impl Message for SliceBackedMessage {
+    type Key = Vec<u8>;
+    type Value = Vec<u8>;
     type KeyRef<'a> = &'a [u8];
     type ValueRef<'a> = &'a [u8];
 

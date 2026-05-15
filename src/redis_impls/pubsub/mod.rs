@@ -16,7 +16,7 @@ use redis::{AsyncCommands, Client, FromRedisValue, Value};
 use tokio_stream::{Stream, StreamExt};
 
 use crate::redis_impls::get_connection;
-use crate::{ByteMessage, Message, PubSubError, Publisher, Subscriber};
+use crate::{Message, PubSubError, Publisher, Subscriber};
 
 #[cfg(test)]
 mod tests;
@@ -37,7 +37,7 @@ impl Publisher for RedisPublisher {
         RedisPublisher { host, topic }
     }
 
-    async fn publish<T, M: Message<T>>(&self, message: M) -> Result<(), PubSubError> {
+    async fn publish<M: Message>(&self, message: M) -> Result<(), PubSubError> {
         let mut conn = get_connection(&self.host).await?;
         let bytes = message.into_bytes();
         Ok(conn.publish(&self.topic, bytes.extract_value()).await?)
@@ -57,7 +57,7 @@ pub struct RedisSubscriber {
 }
 
 impl RedisSubscriber {
-    async fn get_pubsub_stream<T, M: Message<T>>(
+    async fn get_pubsub_stream<M: Message>(
         &self,
     ) -> Result<impl Stream<Item = Result<M, PubSubError>> + Unpin + Send, PubSubError> {
         let client = Client::open(self.host.as_str())?;
@@ -66,10 +66,10 @@ impl RedisSubscriber {
         Ok(subscription.into_on_message().map(|incoming| {
             let payload: Value = incoming.get_payload()?;
             match payload {
-                Value::BulkString(bytes) => Ok(M::from(ByteMessage::from_value(bytes))),
+                Value::BulkString(bytes) => Ok(M::from_bytes(None, &bytes)),
                 other => {
                     let payload = String::from_redis_value(other)?;
-                    Ok(M::from(ByteMessage::from_value(payload.into_bytes())))
+                    Ok(M::from_bytes(None, &payload.into_bytes()))
                 }
             }
         }))
@@ -82,7 +82,7 @@ impl Subscriber for RedisSubscriber {
         RedisSubscriber { host, topic }
     }
 
-    async fn get_stream<T, M: Message<T>>(
+    async fn get_stream<M: Message>(
         &mut self,
     ) -> Result<impl Stream<Item = Result<M, PubSubError>> + Unpin + Send, PubSubError> {
         self.get_pubsub_stream().await
