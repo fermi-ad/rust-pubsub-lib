@@ -11,7 +11,8 @@
 //! - `kafka` exposes [`kafka_impl`](crate::kafka_impl).
 //! - `redis-pubsub` exposes Redis pub/sub implementations under [`redis_impls`](crate::redis_impls).
 //! - `redis-stream` exposes Redis Stream implementations under [`redis_impls`](crate::redis_impls).
-//! - `testing-utils` exposes mock broker helpers intended for tests.
+//! - `testing-utils` exposes mock broker helpers intended for tests. Must be combined
+//!   with `kafka` and/or `redis-pubsub`/`redis-stream` to have any effect.
 //!
 //! ## Choosing a message type
 //!
@@ -44,14 +45,15 @@
 //! assert_eq!(message.value_ref(), "value");
 //! ```
 //!
-//! Cloning data out of a message when ownership is needed:
+//! Consuming a message to extract both key and value by moving ownership out of it:
 //!
 //! ```
 //! use rust_pubsub_lib::{Message, StringMessage};
 //!
 //! let message = StringMessage::new(Some("key".to_string()), "value".to_string());
-//! assert_eq!(message.key(), Some("key".to_string()));
-//! assert_eq!(message.value(), "value".to_string());
+//! let (key, value) = message.extract_key_value();
+//! assert_eq!(key, Some("key".to_string()));
+//! assert_eq!(value, "value".to_string());
 //! ```
 //!
 //! Consuming a message to extract its stored value without an extra clone:
@@ -77,10 +79,10 @@
 //! A snapshot loads the messages currently available on a topic:
 //!
 //! ```ignore
-//! use rust_pubsub_lib::redis_impls::stream::RedisSnapshot;
+//! use rust_pubsub_lib::RedisStreamSnapshot;
 //! use rust_pubsub_lib::{Snapshot, StringMessage};
 //!
-//! let messages = RedisSnapshot::get::<StringMessage>(
+//! let messages = RedisStreamSnapshot::get::<StringMessage>(
 //!     "redis://127.0.0.1:6379".to_string(),
 //!     "events".to_string(),
 //! ).await?;
@@ -90,11 +92,11 @@
 //! A subscriber yields a stream of results over time:
 //!
 //! ```ignore
-//! use rust_pubsub_lib::redis_impls::pubsub::RedisSubscriber;
+//! use rust_pubsub_lib::RedisPubSubSubscriber;
 //! use rust_pubsub_lib::{StringMessage, Subscriber};
 //! use tokio_stream::StreamExt;
 //!
-//! let mut subscriber = RedisSubscriber::new(
+//! let mut subscriber = RedisPubSubSubscriber::new(
 //!     "redis://127.0.0.1:6379".to_string(),
 //!     "events".to_string(),
 //! );
@@ -153,19 +155,20 @@ const CANNED_ERR_MESSAGE: &str = "The PubSub library encountered an error.";
 /// [`Message::from_value()`] when only the value is relevant, or [`Message::from_bytes()`] when a
 /// backend is decoding raw transport bytes.
 ///
-/// The trait is generic over two independent type parameters:
-/// - `K` — the owned key type (e.g. `String`, `Vec<u8>`, or a custom domain type)
-/// - `V` — the owned value type (e.g. `String`, `Vec<u8>`, or a custom domain type)
-///
-/// Both built-in message types ([`ByteMessage`] and [`StringMessage`]) use the same type for key
-/// and value, but custom implementations may freely choose different types for each.
+/// The trait defines four associated types: `Key` and `Value` for owned data, and
+/// `KeyRef<'a>` and `ValueRef<'a>` for borrowed views. Each implementing type chooses
+/// exactly one concrete type for each. Both built-in types ([`ByteMessage`] and
+/// [`StringMessage`]) use the same type for key and value (e.g. `String`/`String`),
+/// but custom implementations may freely use different types — for example, a domain
+/// type that uses a `u64` key with a `String` value, or a `Vec<u8>` key with a
+/// structured value type.
 ///
 /// The ownership-oriented accessors are intentionally split into three modes:
 ///
 /// - use [`Message::key()`] and [`Message::value()`] when you want owned clones of the stored data
 /// - use [`Message::key_ref()`] and [`Message::value_ref()`] when read-only borrowed access is
-///   enough; these borrowed views may be more idiomatic than `&K`/`&V` for a concrete
-///   implementation, such as `&str` or `&[u8]`
+///   enough; these borrowed views (`KeyRef<'_>` and `ValueRef<'_>`) may be more idiomatic than
+///   a plain reference for a concrete implementation, such as `&str` or `&[u8]`
 /// - use [`Message::extract_key()`], [`Message::extract_key_value()`], and
 ///   [`Message::extract_value()`] when consuming the message and transferring ownership out of it
 pub trait Message: Clone + Debug + PartialEq + From<ByteMessage> + Send + Sync {
