@@ -51,7 +51,7 @@ impl Publisher for KafkaPublisher {
         Self { host, topic }
     }
 
-    async fn publish<T, M: Message<T>>(&self, message: M) -> Result<(), PubSubError> {
+    async fn publish<M: Message>(&self, message: M) -> Result<(), PubSubError> {
         let producer = cache::get_kafka_producer(self.host.clone()).await?;
         let bytes = message.into_bytes();
         let mut record = FutureRecord::to(&self.topic).payload(&bytes.value);
@@ -71,6 +71,12 @@ impl Debug for KafkaPublisher {
             .field("host", &self.host)
             .field("topic", &self.topic)
             .finish()
+    }
+}
+
+impl From<KafkaError> for PubSubError {
+    fn from(value: KafkaError) -> Self {
+        PubSubError::from_debug(value)
     }
 }
 
@@ -125,7 +131,7 @@ impl KafkaSnapshot {
 
 #[async_trait::async_trait]
 impl Snapshot for KafkaSnapshot {
-    async fn get<T, M: Message<T>>(host: String, topic: String) -> Result<Vec<M>, PubSubError> {
+    async fn get<M: Message>(host: String, topic: String) -> Result<Vec<M>, PubSubError> {
         let consumer = Self::configure_consumer(&host, &topic)?;
         let mut offsets = Self::determine_max_offsets(&consumer, &topic)?;
 
@@ -163,11 +169,11 @@ pub struct KafkaSubscriber {
 }
 
 impl KafkaSubscriber {
-    fn convert_stream<T, M: Message<T>>(
+    fn convert_stream<M: Message>(
         stream: BroadcastStream<ByteMessage>,
     ) -> impl Stream<Item = Result<M, PubSubError>> + Unpin + Send {
         stream.map(|incoming| match incoming {
-            Ok(msg) => Ok(M::from_bytes(msg.key.as_deref(), &msg.value)),
+            Ok(msg) => Ok(M::from(msg)),
             Err(err) => Err(PubSubError::from_debug(err)),
         })
     }
@@ -179,10 +185,10 @@ impl Subscriber for KafkaSubscriber {
         Self { host, topic }
     }
 
-    async fn get_stream<T, M: Message<T>>(
+    async fn get_stream<M: Message>(
         &mut self,
     ) -> Result<impl Stream<Item = Result<M, PubSubError>> + Unpin + Send, PubSubError> {
-        Ok(Self::convert_stream(
+        Ok(Self::convert_stream::<M>(
             cache::get_kafka_stream(self.host.clone(), self.topic.clone()).await,
         ))
     }
@@ -197,18 +203,12 @@ impl Debug for KafkaSubscriber {
     }
 }
 
-impl From<KafkaError> for PubSubError {
-    fn from(value: KafkaError) -> Self {
-        PubSubError::from_debug(value)
-    }
-}
-
 fn get_kafka_timeout_val() -> Duration {
     let secs = env_var::get("KAFKA_CONNECTION_SECONDS").or(1);
     Duration::from_secs(secs)
 }
 
-fn convert_to_message<T, M: Message<T>>(incoming: BorrowedMessage) -> Result<M, PubSubError> {
+fn convert_to_message<M: Message>(incoming: BorrowedMessage) -> Result<M, PubSubError> {
     let value = incoming.payload().ok_or_else(PubSubError::default)?;
     let key = incoming.key();
 

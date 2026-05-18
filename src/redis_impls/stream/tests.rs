@@ -3,6 +3,7 @@
 //! These tests cover publishing, snapshots, subscriber fan-out, cache reuse, idle eviction, and
 //! stream-entry conversion behavior for the Redis Stream backend.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use serde_json::json;
@@ -10,7 +11,7 @@ use tokio::time::{sleep, timeout};
 use tokio_stream::StreamExt;
 
 use super::*;
-use crate::{Message, RedisTestHarness, StringMessage};
+use crate::{MapMessage, Message, RedisTestHarness, StringMessage};
 
 #[tokio::test]
 async fn redis_stream_publish_records_payload_on_mock_server() {
@@ -33,12 +34,10 @@ async fn redis_stream_publish_records_payload_on_mock_server() {
 async fn redis_stream_snapshot_is_empty_for_unseen_stream() {
     let context = RedisTestHarness::new(None).await;
 
-    let snapshot = RedisSnapshot::get::<String, StringMessage>(
-        context.get_host(),
-        "empty-stream-topic".to_string(),
-    )
-    .await
-    .unwrap();
+    let snapshot =
+        RedisSnapshot::get::<StringMessage>(context.get_host(), "empty-stream-topic".to_string())
+            .await
+            .unwrap();
 
     assert!(snapshot.is_empty());
 }
@@ -56,10 +55,9 @@ async fn redis_stream_snapshot_returns_existing_entries() {
     assert!(context.check_for_message("snapshot payload").await.is_ok());
     sleep(Duration::from_millis(100)).await;
 
-    let snapshot =
-        RedisSnapshot::get::<String, StringMessage>(host, "snapshot-stream-topic".to_string())
-            .await
-            .unwrap();
+    let snapshot = RedisSnapshot::get::<StringMessage>(host, "snapshot-stream-topic".to_string())
+        .await
+        .unwrap();
 
     assert!(
         snapshot
@@ -76,10 +74,7 @@ async fn redis_stream_subscriber_receives_messages() {
     let mut subscriber = RedisSubscriber::new(host.clone(), topic.clone());
     let publisher = RedisPublisher::new(host, topic);
 
-    let mut stream = subscriber
-        .get_stream::<String, StringMessage>()
-        .await
-        .unwrap();
+    let mut stream = subscriber.get_stream::<StringMessage>().await.unwrap();
     publisher
         .publish(StringMessage::from_value("live payload".to_string()))
         .await
@@ -103,8 +98,8 @@ async fn redis_stream_fans_out_to_multiple_subscribers() {
     let mut second = RedisSubscriber::new(host.clone(), topic.clone());
     let publisher = RedisPublisher::new(host, topic);
 
-    let mut stream_a = first.get_stream::<String, StringMessage>().await.unwrap();
-    let mut stream_b = second.get_stream::<String, StringMessage>().await.unwrap();
+    let mut stream_a = first.get_stream::<StringMessage>().await.unwrap();
+    let mut stream_b = second.get_stream::<StringMessage>().await.unwrap();
 
     publisher
         .publish(StringMessage::from_value("fanout payload".to_string()))
@@ -139,10 +134,7 @@ async fn redis_stream_reuses_one_cached_stream_per_host_and_topic() {
     drop(second);
 
     let mut subscriber = RedisSubscriber::new(host, topic);
-    let mut stream = subscriber
-        .get_stream::<String, StringMessage>()
-        .await
-        .unwrap();
+    let mut stream = subscriber.get_stream::<StringMessage>().await.unwrap();
 
     let err = timeout(Duration::from_secs(5), stream.next())
         .await
@@ -179,10 +171,7 @@ async fn redis_stream_cached_stream_is_evicted_after_going_idle() {
     sleep(Duration::from_secs(4)).await;
 
     let mut subscriber = RedisSubscriber::new(host, topic);
-    let mut stream = subscriber
-        .get_stream::<String, StringMessage>()
-        .await
-        .unwrap();
+    let mut stream = subscriber.get_stream::<StringMessage>().await.unwrap();
 
     let err = timeout(Duration::from_secs(5), stream.next())
         .await
@@ -200,10 +189,7 @@ async fn redis_stream_cached_stream_is_evicted_after_going_idle() {
 async fn redis_stream_subscriber_reports_connection_failure() {
     let mut subscriber =
         RedisSubscriber::new("not-a-valid-redis-uri".to_string(), "topic".to_string());
-    let mut stream = subscriber
-        .get_stream::<String, StringMessage>()
-        .await
-        .unwrap();
+    let mut stream = subscriber.get_stream::<StringMessage>().await.unwrap();
 
     let err = timeout(Duration::from_secs(5), stream.next())
         .await
@@ -216,6 +202,205 @@ async fn redis_stream_subscriber_reports_connection_failure() {
             .is_some_and(|cause| cause.contains("Redis URL did not parse"))
     );
 }
+
+// ── MapMessage unit tests ────────────────────────────────────────────────────
+
+#[test]
+fn map_message_value_is_json_serialized_fields() {
+    let mut fields = HashMap::new();
+    fields.insert("sensor_id".to_string(), "abc123".to_string());
+    fields.insert("temperature".to_string(), "22.5".to_string());
+    let msg = MapMessage::from_fields(fields.clone());
+
+    // value() returns the native map — no JSON involved at the accessor level
+    assert_eq!(msg.value(), fields);
+
+    // into_bytes() serializes to JSON; parse it back and check individual keys
+    let bytes = msg.into_bytes();
+    let decoded: serde_json::Value = serde_json::from_slice(bytes.value_ref()).unwrap();
+    assert_eq!(decoded["sensor_id"], "abc123");
+    assert_eq!(decoded["temperature"], "22.5");
+}
+
+#[test]
+fn map_message_from_bytes_parses_json() {
+    let json = br#"{"field1":"val1","field2":"val2"}"#;
+    let msg = MapMessage::from_bytes(None, json);
+    assert_eq!(msg.value()["field1"], "val1");
+    assert_eq!(msg.value()["field2"], "val2");
+}
+
+#[test]
+fn map_message_from_bytes_falls_back_to_data_key_for_non_json() {
+    let raw = b"not-json-at-all";
+    let msg = MapMessage::from_bytes(None, raw);
+    assert_eq!(msg.value()["data"], "not-json-at-all");
+}
+
+#[test]
+fn map_message_from_byte_message_round_trips() {
+    let mut fields = HashMap::new();
+    fields.insert("k".to_string(), "v".to_string());
+    let original = MapMessage::from_fields(fields.clone());
+    let bytes = original.into_bytes();
+    let recovered = MapMessage::from(bytes);
+    assert_eq!(recovered.value(), fields);
+}
+
+#[test]
+fn map_message_into_stream_fields_emits_raw_pairs() {
+    let mut fields = HashMap::new();
+    fields.insert("alpha".to_string(), "one".to_string());
+    fields.insert("beta".to_string(), "two".to_string());
+    let msg = MapMessage::from_fields(fields);
+
+    let stream_fields = msg.into_stream_fields();
+    let as_map: HashMap<String, String> = stream_fields
+        .into_iter()
+        .map(|(k, v)| (k, String::from_utf8(v).unwrap()))
+        .collect();
+
+    assert_eq!(as_map["alpha"], "one");
+    assert_eq!(as_map["beta"], "two");
+}
+
+// ── MapMessage integration tests ─────────────────────────────────────────────
+
+#[tokio::test]
+async fn map_message_publish_stream_snapshot_round_trip() {
+    let mut context = RedisTestHarness::new(None).await;
+    let host = context.get_host();
+    let topic = "map-msg-snapshot-topic".to_string();
+    let publisher = RedisPublisher::new(host.clone(), topic.clone());
+
+    let mut fields = HashMap::new();
+    fields.insert("sensor_id".to_string(), "abc123".to_string());
+    fields.insert("temperature".to_string(), "22.5".to_string());
+    let msg = MapMessage::from_fields(fields.clone());
+
+    publisher.publish_stream(msg).await.unwrap();
+    assert!(context.check_for_message("abc123").await.is_ok());
+    sleep(Duration::from_millis(100)).await;
+
+    let snapshot = RedisSnapshot::get::<MapMessage>(host, topic).await.unwrap();
+    assert!(!snapshot.is_empty());
+
+    let recovered = &snapshot[0];
+    assert_eq!(recovered.value()["sensor_id"], "abc123");
+    assert_eq!(recovered.value()["temperature"], "22.5");
+}
+
+#[tokio::test]
+async fn map_message_publish_stream_subscriber_round_trip() {
+    let mut context = RedisTestHarness::new(None).await;
+    let host = context.get_host();
+    let topic = "map-msg-subscriber-topic".to_string();
+    let mut subscriber = RedisSubscriber::new(host.clone(), topic.clone());
+    let publisher = RedisPublisher::new(host, topic);
+
+    let mut stream = subscriber.get_stream::<MapMessage>().await.unwrap();
+
+    let mut fields = HashMap::new();
+    fields.insert("event".to_string(), "click".to_string());
+    fields.insert("user".to_string(), "u42".to_string());
+    let msg = MapMessage::from_fields(fields);
+
+    publisher.publish_stream(msg).await.unwrap();
+    assert!(context.check_for_message("click").await.is_ok());
+
+    let received = timeout(Duration::from_secs(5), stream.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(received.value()["event"], "click");
+    assert_eq!(received.value()["user"], "u42");
+}
+
+#[tokio::test]
+async fn publish_via_trait_still_uses_data_field() {
+    let mut context = RedisTestHarness::new(None).await;
+    let host = context.get_host();
+    let topic = "map-msg-trait-publish-topic".to_string();
+    let publisher = RedisPublisher::new(host.clone(), topic.clone());
+
+    let mut fields = HashMap::new();
+    fields.insert("key".to_string(), "value".to_string());
+    let msg = MapMessage::from_fields(fields);
+
+    // Use the Publisher trait's publish() — must serialize via into_bytes() and write a single
+    // "data" field containing the JSON-encoded map, not individual fields.
+    publisher.publish(msg).await.unwrap();
+
+    // The broadcast payload is the value of the "data" field, which is the JSON-encoded map.
+    // It contains "key" as a substring.
+    assert!(context.check_for_message("key").await.is_ok());
+
+    sleep(Duration::from_millis(100)).await;
+
+    // Read back as MapMessage via snapshot. The stream entry has a single "data" field whose
+    // value is the JSON-encoded map. stream_entry_to_byte_message normalizes it to
+    // {"data": "{\"key\":\"value\"}"}, and MapMessage::from() parses that outer JSON as
+    // HashMap<String,String>, giving {"data": "{\"key\":\"value\"}"}.
+    let snapshot = RedisSnapshot::get::<MapMessage>(host, topic).await.unwrap();
+    assert!(!snapshot.is_empty());
+    let recovered = &snapshot[0];
+    // The recovered map has a "data" key containing the JSON-serialized original fields.
+    let data_value = recovered.value()["data"].clone();
+    let inner: serde_json::Value = serde_json::from_str(&data_value).unwrap();
+    assert_eq!(inner["key"], "value");
+}
+
+// ── RedisPublisher stream-length setter tests ─────────────────────────────────
+
+#[test]
+fn set_approx_stream_max_len_updates_the_limit() {
+    let mut publisher = RedisPublisher::new("redis://127.0.0.1/".to_string(), "t".to_string());
+    publisher.set_approx_stream_max_len(500);
+    assert_eq!(publisher.stream_max_len, StreamMaxlen::Approx(500));
+}
+
+#[test]
+fn set_exact_stream_max_len_updates_the_limit() {
+    let mut publisher = RedisPublisher::new("redis://127.0.0.1/".to_string(), "t".to_string());
+    publisher.set_exact_stream_max_len(250);
+    assert_eq!(publisher.stream_max_len, StreamMaxlen::Equals(250));
+}
+
+#[tokio::test]
+async fn set_approx_stream_max_len_is_respected_on_publish() {
+    let mut context = RedisTestHarness::new(None).await;
+    let host = context.get_host();
+    let topic = "approx-maxlen-topic".to_string();
+    let mut publisher = RedisPublisher::new(host, topic);
+    publisher.set_approx_stream_max_len(10);
+
+    publisher
+        .publish(StringMessage::from_value("approx-payload".to_string()))
+        .await
+        .unwrap();
+
+    assert!(context.check_for_message("approx-payload").await.is_ok());
+}
+
+#[tokio::test]
+async fn set_exact_stream_max_len_is_respected_on_publish() {
+    let mut context = RedisTestHarness::new(None).await;
+    let host = context.get_host();
+    let topic = "exact-maxlen-topic".to_string();
+    let mut publisher = RedisPublisher::new(host, topic);
+    publisher.set_exact_stream_max_len(10);
+
+    publisher
+        .publish(StringMessage::from_value("exact-payload".to_string()))
+        .await
+        .unwrap();
+
+    assert!(context.check_for_message("exact-payload").await.is_ok());
+}
+
+// ── Existing stream-entry conversion tests ────────────────────────────────────
 
 #[test]
 fn stream_entry_to_json_bytes_preserves_nested_shapes() {

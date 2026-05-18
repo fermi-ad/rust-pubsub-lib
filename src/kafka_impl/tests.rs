@@ -75,7 +75,7 @@ async fn kafka_snapshot_empty_topic_returns_empty_without_hanging() {
 
     let result = timeout(
         Duration::from_secs(2),
-        KafkaSnapshot::get::<String, StringMessage>(host, topic),
+        KafkaSnapshot::get::<StringMessage>(host, topic),
     )
     .await
     .expect("snapshot call timed out")

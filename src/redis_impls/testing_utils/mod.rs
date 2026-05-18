@@ -14,6 +14,7 @@ use tokio::spawn;
 use tokio::sync::{Mutex, broadcast, oneshot};
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
+use tracing::{debug, error};
 
 #[cfg(test)]
 mod tests;
@@ -92,6 +93,172 @@ impl Drop for TestHarness {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct StreamEntry {
+    id: String,
+    /// Ordered list of field/value pairs for this stream entry.
+    fields: Vec<(String, String)>,
+}
+
+#[derive(Debug, Default)]
+struct StreamState {
+    entries_by_topic: Mutex<HashMap<String, Vec<StreamEntry>>>,
+}
+
+impl StreamState {
+    async fn push(&self, topic: &str, fields: Vec<(String, String)>) -> String {
+        let mut entries_by_topic = self.entries_by_topic.lock().await;
+        let entries = entries_by_topic.entry(topic.to_string()).or_default();
+        let id = format!("{}-0", entries.len() + 1);
+        entries.push(StreamEntry {
+            id: id.clone(),
+            fields,
+        });
+        id
+    }
+
+    async fn all(&self, topic: &str) -> Vec<StreamEntry> {
+        self.entries_by_topic
+            .lock()
+            .await
+            .get(topic)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    async fn after(&self, topic: &str, last_seen: &str) -> Vec<StreamEntry> {
+        let entries_by_topic = self.entries_by_topic.lock().await;
+        let Some(entries) = entries_by_topic.get(topic) else {
+            return Vec::new();
+        };
+        if last_seen == "$" {
+            return entries.last().cloned().into_iter().collect();
+        }
+        entries
+            .iter()
+            .filter(|entry| entry.id.as_str() > last_seen)
+            .cloned()
+            .collect()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Command {
+    Client {
+        args: Vec<String>,
+    },
+    Publish {
+        topic: String,
+        payload: String,
+    },
+    /// An `XADD` command. `fields` holds the ordered field/value pairs after the entry ID (`*`).
+    Xadd {
+        topic: String,
+        fields: Vec<(String, String)>,
+    },
+    Xrange {
+        topic: String,
+    },
+    Xread {
+        topic: String,
+        last_seen: String,
+    },
+    Subscribe {
+        topics: Vec<String>,
+    },
+    Unknown {
+        name: String,
+        args: Vec<String>,
+    },
+}
+
+impl Command {
+    fn from_parts(cmd: String, args: Vec<String>) -> Self {
+        match cmd.as_str() {
+            "CLIENT" => Command::Client { args },
+            "PUBLISH" if args.len() >= 2 => {
+                let [topic, ..] = args.as_slice() else {
+                    unreachable!();
+                };
+                Command::Publish {
+                    topic: topic.clone(),
+                    payload: args.last().cloned().unwrap_or_default(),
+                }
+            }
+            "XADD" if args.len() >= 4 => {
+                // args layout (after MAXLEN trimming):
+                //   [topic, maxlen_modifier?, maxlen_value?, id, field1, val1, field2, val2, ...]
+                // We skip everything up to and including the `*` (or numeric) entry-ID token,
+                // then collect the remaining tokens as field/value pairs.
+                let [topic, rest @ ..] = args.as_slice() else {
+                    unreachable!();
+                };
+                // Find the entry-ID token: it is either "*" or looks like "N-M".
+                let field_start = rest
+                    .iter()
+                    .position(|a| a == "*" || a.contains('-'))
+                    .map(|i| i + 1)
+                    .unwrap_or(rest.len());
+                let field_args = &rest[field_start..];
+                let fields: Vec<(String, String)> = field_args
+                    .chunks(2)
+                    .filter_map(|chunk| {
+                        if let [k, v] = chunk {
+                            Some((k.clone(), v.clone()))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                Command::Xadd {
+                    topic: topic.clone(),
+                    fields,
+                }
+            }
+            "XRANGE" if !args.is_empty() => {
+                let [topic, ..] = args.as_slice() else {
+                    unreachable!();
+                };
+                Command::Xrange {
+                    topic: topic.clone(),
+                }
+            }
+            "XREAD" => {
+                let topic = args
+                    .iter()
+                    .position(|arg| arg == "STREAMS")
+                    .and_then(|idx| args.get(idx + 1))
+                    .cloned();
+                match topic {
+                    Some(topic) => Command::Xread {
+                        topic,
+                        last_seen: args.last().cloned().unwrap_or_else(|| "$".to_string()),
+                    },
+                    None => Command::Unknown { name: cmd, args },
+                }
+            }
+            "SUBSCRIBE" => Command::Subscribe { topics: args },
+            _ => Command::Unknown { name: cmd, args },
+        }
+    }
+
+    fn describe(&self) -> String {
+        match self {
+            Command::Client { args } => format!("CLIENT {args:?}"),
+            Command::Publish { topic, payload } => {
+                format!("PUBLISH [{topic:?}, {payload:?}]")
+            }
+            Command::Xadd { topic, fields } => format!("XADD [{topic:?}, {fields:?}]"),
+            Command::Xrange { topic } => format!("XRANGE [{topic:?}]"),
+            Command::Xread { topic, last_seen } => {
+                format!("XREAD [{topic:?}, {last_seen:?}]")
+            }
+            Command::Subscribe { topics } => format!("SUBSCRIBE {topics:?}"),
+            Command::Unknown { name, args } => format!("{name} {args:?}"),
+        }
+    }
+}
+
 async fn listen_for_requests(
     shutdown_token: CancellationToken,
     host_sender: oneshot::Sender<String>,
@@ -102,7 +269,7 @@ async fn listen_for_requests(
     let listener = match TcpListener::bind("127.0.0.1:0").await {
         Ok(listener) => listener,
         Err(e) => {
-            eprintln!("Error binding mock Redis server: {}", e);
+            error!("Error binding mock Redis server: {}", e);
             return;
         }
     };
@@ -115,7 +282,7 @@ async fn listen_for_requests(
     loop {
         tokio::select! {
             _ = shutdown_token.cancelled() => {
-                println!("Shutting down mock Redis server.");
+                debug!("Shutting down mock Redis server.");
                 break;
             }
             accept_result = listener.accept() => {
@@ -131,7 +298,7 @@ async fn listen_for_requests(
                         ));
                     }
                     Err(e) => {
-                        eprintln!("Error accepting connection: {}", e);
+                        error!("Error accepting connection: {}", e);
                     }
                 }
             }
@@ -152,12 +319,12 @@ async fn handle_connection(
     loop {
         tokio::select! {
             _ = shutdown_token.cancelled() => {
-                println!("Closing connection due to server shutdown.");
+                debug!("Closing connection due to server shutdown.");
                 break;
             }
             val = stream.readable() => {
                 if let Err(e) = val {
-                    eprintln!("Error waiting for stream to become readable: {}", e);
+                    error!("Error waiting for stream to become readable: {}", e);
                     break;
                 }
                 if let Err(e) = read_stream(
@@ -169,7 +336,7 @@ async fn handle_connection(
                     &pubsub_messages,
                     &stream_state,
                 ).await {
-                    eprintln!("Error reading from connection: {}", e);
+                    error!("Error reading from connection: {}", e);
                     break;
                 }
             }
@@ -188,7 +355,7 @@ async fn read_stream(
 ) -> Result<(), String> {
     let responses = match stream.read(buffer).await {
         Ok(0) => {
-            println!("Connection closed by client.");
+            debug!("Connection closed by client.");
             return Ok(());
         }
         Ok(n) => {
@@ -201,7 +368,7 @@ async fn read_stream(
 
             let mut responses: Vec<String> = Vec::new();
             for command in commands {
-                println!("command={command:?}");
+                debug!("command={command:?}");
                 let _ = connection_sender.send(command.describe());
                 responses.push(
                     execute_command(command, message_sender, pubsub_messages, stream_state).await?,
@@ -238,9 +405,15 @@ async fn execute_command(
             let _ = message_sender.send(payload);
             Ok(":1\r\n".to_string())
         }
-        Command::Xadd { topic, payload } => {
-            let id = stream_state.push(&topic, payload.clone()).await;
-            let _ = message_sender.send(payload);
+        Command::Xadd { topic, fields } => {
+            // Broadcast all field values joined so check_for_message can match any of them.
+            let broadcast_payload = fields
+                .iter()
+                .map(|(_, v)| v.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let id = stream_state.push(&topic, fields).await;
+            let _ = message_sender.send(broadcast_payload);
             Ok(encode_bulk_string(&id))
         }
         Command::Xrange { topic } => {
@@ -302,131 +475,6 @@ async fn wait_for_broadcast_message(
     .map_err(|_| format!("{label} not found: {expected}"))?
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct StreamEntry {
-    id: String,
-    payload: String,
-}
-
-#[derive(Debug, Default)]
-struct StreamState {
-    entries_by_topic: Mutex<HashMap<String, Vec<StreamEntry>>>,
-}
-
-impl StreamState {
-    async fn push(&self, topic: &str, payload: String) -> String {
-        let mut entries_by_topic = self.entries_by_topic.lock().await;
-        let entries = entries_by_topic.entry(topic.to_string()).or_default();
-        let id = format!("{}-0", entries.len() + 1);
-        entries.push(StreamEntry {
-            id: id.clone(),
-            payload,
-        });
-        id
-    }
-
-    async fn all(&self, topic: &str) -> Vec<StreamEntry> {
-        self.entries_by_topic
-            .lock()
-            .await
-            .get(topic)
-            .cloned()
-            .unwrap_or_default()
-    }
-
-    async fn after(&self, topic: &str, last_seen: &str) -> Vec<StreamEntry> {
-        let entries_by_topic = self.entries_by_topic.lock().await;
-        let Some(entries) = entries_by_topic.get(topic) else {
-            return Vec::new();
-        };
-        if last_seen == "$" {
-            return entries.last().cloned().into_iter().collect();
-        }
-        entries
-            .iter()
-            .filter(|entry| entry.id.as_str() > last_seen)
-            .cloned()
-            .collect()
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum Command {
-    Client { args: Vec<String> },
-    Publish { topic: String, payload: String },
-    Xadd { topic: String, payload: String },
-    Xrange { topic: String },
-    Xread { topic: String, last_seen: String },
-    Subscribe { topics: Vec<String> },
-    Unknown { name: String, args: Vec<String> },
-}
-
-impl Command {
-    fn from_parts(cmd: String, args: Vec<String>) -> Self {
-        match cmd.as_str() {
-            "CLIENT" => Command::Client { args },
-            "PUBLISH" if args.len() >= 2 => {
-                let [topic, ..] = args.as_slice() else {
-                    unreachable!();
-                };
-                Command::Publish {
-                    topic: topic.clone(),
-                    payload: args.last().cloned().unwrap_or_default(),
-                }
-            }
-            "XADD" if args.len() >= 4 => {
-                let [topic, ..] = args.as_slice() else {
-                    unreachable!();
-                };
-                Command::Xadd {
-                    topic: topic.clone(),
-                    payload: args.last().cloned().unwrap_or_default(),
-                }
-            }
-            "XRANGE" if !args.is_empty() => {
-                let [topic, ..] = args.as_slice() else {
-                    unreachable!();
-                };
-                Command::Xrange {
-                    topic: topic.clone(),
-                }
-            }
-            "XREAD" => {
-                let topic = args
-                    .iter()
-                    .position(|arg| arg == "STREAMS")
-                    .and_then(|idx| args.get(idx + 1))
-                    .cloned();
-                match topic {
-                    Some(topic) => Command::Xread {
-                        topic,
-                        last_seen: args.last().cloned().unwrap_or_else(|| "$".to_string()),
-                    },
-                    None => Command::Unknown { name: cmd, args },
-                }
-            }
-            "SUBSCRIBE" => Command::Subscribe { topics: args },
-            _ => Command::Unknown { name: cmd, args },
-        }
-    }
-
-    fn describe(&self) -> String {
-        match self {
-            Command::Client { args } => format!("CLIENT {args:?}"),
-            Command::Publish { topic, payload } => {
-                format!("PUBLISH [{topic:?}, {payload:?}]")
-            }
-            Command::Xadd { topic, payload } => format!("XADD [{topic:?}, {payload:?}]"),
-            Command::Xrange { topic } => format!("XRANGE [{topic:?}]"),
-            Command::Xread { topic, last_seen } => {
-                format!("XREAD [{topic:?}, {last_seen:?}]")
-            }
-            Command::Subscribe { topics } => format!("SUBSCRIBE {topics:?}"),
-            Command::Unknown { name, args } => format!("{name} {args:?}"),
-        }
-    }
-}
-
 fn encode_bulk_string(value: &str) -> String {
     format!("${}\r\n{}\r\n", value.len(), value)
 }
@@ -436,9 +484,13 @@ fn encode_stream_entries(entries: &[StreamEntry]) -> String {
     for entry in entries {
         response.push_str("*2\r\n");
         response.push_str(&encode_bulk_string(&entry.id));
-        response.push_str("*2\r\n");
-        response.push_str("$4\r\ndata\r\n");
-        response.push_str(&encode_bulk_string(&entry.payload));
+        // Encode the field/value pairs as a flat RESP array: [field1, val1, field2, val2, ...]
+        let field_count = entry.fields.len() * 2;
+        response.push_str(&format!("*{field_count}\r\n"));
+        for (field, value) in &entry.fields {
+            response.push_str(&encode_bulk_string(field));
+            response.push_str(&encode_bulk_string(value));
+        }
     }
     response
 }
