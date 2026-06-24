@@ -31,7 +31,7 @@ async fn redis_stream_cached_runtime_starts_when_first_receiver_is_requested() {
 async fn redis_stream_cached_runtime_starts_when_subscriber_requests_a_stream() {
     let host = "not-a-valid-redis-uri".to_string();
     let topic = "lazy-runtime-start-topic".to_string();
-    let mut subscriber = StreamRedisSubscriber::new(host.clone(), topic.clone());
+    let subscriber = StreamRedisSubscriber::new(host.clone(), topic.clone());
 
     let _stream = subscriber.get_stream::<StringMessage>().await.unwrap();
     sleep(Duration::from_millis(200)).await;
