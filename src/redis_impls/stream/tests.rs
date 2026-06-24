@@ -71,7 +71,7 @@ async fn redis_stream_subscriber_receives_messages() {
     let mut context = RedisTestHarness::new(None).await;
     let host = context.get_host();
     let topic = "subscriber-stream-topic".to_string();
-    let mut subscriber = RedisSubscriber::new(host.clone(), topic.clone());
+    let subscriber = RedisSubscriber::new(host.clone(), topic.clone());
     let publisher = RedisPublisher::new(host, topic);
 
     let mut stream = subscriber.get_stream::<StringMessage>().await.unwrap();
@@ -94,8 +94,8 @@ async fn redis_stream_fans_out_to_multiple_subscribers() {
     let mut context = RedisTestHarness::new(None).await;
     let host = context.get_host();
     let topic = "fanout-stream-topic".to_string();
-    let mut first = RedisSubscriber::new(host.clone(), topic.clone());
-    let mut second = RedisSubscriber::new(host.clone(), topic.clone());
+    let first = RedisSubscriber::new(host.clone(), topic.clone());
+    let second = RedisSubscriber::new(host.clone(), topic.clone());
     let publisher = RedisPublisher::new(host, topic);
 
     let mut stream_a = first.get_stream::<StringMessage>().await.unwrap();
@@ -133,7 +133,7 @@ async fn redis_stream_reuses_one_cached_stream_per_host_and_topic() {
     drop(first);
     drop(second);
 
-    let mut subscriber = RedisSubscriber::new(host, topic);
+    let subscriber = RedisSubscriber::new(host, topic);
     let mut stream = subscriber.get_stream::<StringMessage>().await.unwrap();
 
     let err = timeout(Duration::from_secs(5), stream.next())
@@ -170,7 +170,7 @@ async fn redis_stream_cached_stream_is_evicted_after_going_idle() {
 
     sleep(Duration::from_secs(4)).await;
 
-    let mut subscriber = RedisSubscriber::new(host, topic);
+    let subscriber = RedisSubscriber::new(host, topic);
     let mut stream = subscriber.get_stream::<StringMessage>().await.unwrap();
 
     let err = timeout(Duration::from_secs(5), stream.next())
@@ -187,8 +187,7 @@ async fn redis_stream_cached_stream_is_evicted_after_going_idle() {
 
 #[tokio::test]
 async fn redis_stream_subscriber_reports_connection_failure() {
-    let mut subscriber =
-        RedisSubscriber::new("not-a-valid-redis-uri".to_string(), "topic".to_string());
+    let subscriber = RedisSubscriber::new("not-a-valid-redis-uri".to_string(), "topic".to_string());
     let mut stream = subscriber.get_stream::<StringMessage>().await.unwrap();
 
     let err = timeout(Duration::from_secs(5), stream.next())
@@ -295,7 +294,7 @@ async fn map_message_publish_stream_subscriber_round_trip() {
     let mut context = RedisTestHarness::new(None).await;
     let host = context.get_host();
     let topic = "map-msg-subscriber-topic".to_string();
-    let mut subscriber = RedisSubscriber::new(host.clone(), topic.clone());
+    let subscriber = RedisSubscriber::new(host.clone(), topic.clone());
     let publisher = RedisPublisher::new(host, topic);
 
     let mut stream = subscriber.get_stream::<MapMessage>().await.unwrap();

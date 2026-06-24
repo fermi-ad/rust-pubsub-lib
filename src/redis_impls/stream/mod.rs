@@ -34,14 +34,14 @@
 //!   normalized structure into JSON bytes.
 
 use std::collections::HashMap;
-use std::fmt::Debug;
+use std::fmt::{self, Debug, Formatter};
 
 use redis::streams::{StreamId, StreamMaxlen, StreamRangeReply};
 use redis::{AsyncCommands, FromRedisValue, Value};
 use tokio_stream::{Stream, StreamExt};
 
 use crate::redis_impls::{get_connection, redis_value_to_byte_message};
-use crate::{ByteMessage, Message, PubSubError, Publisher, Snapshot, Subscriber};
+use crate::{ByteMessage, Message, MessageStream, PubSubError, Publisher, Snapshot, Subscriber};
 
 mod cache;
 mod runtime;
@@ -210,21 +210,6 @@ impl StreamMessage for MapMessage {
 impl StreamMessage for crate::ByteMessage {}
 impl StreamMessage for crate::StringMessage {}
 
-/// Attempts to parse `bytes` as a JSON `HashMap<String, String>`.
-///
-/// Falls back to a single-entry map `{"data": <lossy-utf8>}` when the bytes are not valid JSON
-/// or do not deserialize as a string-to-string map.
-fn parse_fields(bytes: &[u8]) -> HashMap<String, String> {
-    serde_json::from_slice::<HashMap<String, String>>(bytes).unwrap_or_else(|_| {
-        let mut map = HashMap::new();
-        map.insert(
-            "data".to_string(),
-            String::from_utf8_lossy(bytes).to_string(),
-        );
-        map
-    })
-}
-
 /// Redis-backed [`Publisher`](crate::Publisher) implementation that writes to Redis Streams via
 /// `XADD`.
 ///
@@ -303,7 +288,6 @@ impl RedisPublisher {
     }
 }
 
-#[async_trait::async_trait]
 impl Publisher for RedisPublisher {
     fn new(host: String, topic: String) -> Self {
         RedisPublisher {
@@ -348,7 +332,6 @@ impl Publisher for RedisPublisher {
 /// message type.
 pub struct RedisSnapshot;
 
-#[async_trait::async_trait]
 impl Snapshot for RedisSnapshot {
     async fn get<M: Message>(host: String, topic: String) -> Result<Vec<M>, PubSubError> {
         let mut conn = get_connection(&host).await?;
@@ -389,27 +372,39 @@ impl RedisSubscriber {
     }
 }
 
-#[async_trait::async_trait]
 impl Subscriber for RedisSubscriber {
     fn new(host: String, topic: String) -> Self {
         RedisSubscriber { host, topic }
     }
 
-    async fn get_stream<M: Message>(
-        &mut self,
-    ) -> Result<impl Stream<Item = Result<M, PubSubError>> + Unpin + Send, PubSubError> {
+    async fn get_stream<M: Message + 'static>(&self) -> Result<MessageStream<M>, PubSubError> {
         let stream = cache::get_redis_stream(self.host.clone(), self.topic.clone()).await;
-        Ok(Self::convert_stream::<M>(stream))
+        Ok(Box::pin(Self::convert_stream::<M>(stream)))
     }
 }
 
 impl Debug for RedisSubscriber {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.debug_struct("RedisSubscriber")
             .field("host", &self.host)
             .field("topic", &self.topic)
             .finish()
     }
+}
+
+/// Attempts to parse `bytes` as a JSON `HashMap<String, String>`.
+///
+/// Falls back to a single-entry map `{"data": <lossy-utf8>}` when the bytes are not valid JSON
+/// or do not deserialize as a string-to-string map.
+fn parse_fields(bytes: &[u8]) -> HashMap<String, String> {
+    serde_json::from_slice::<HashMap<String, String>>(bytes).unwrap_or_else(|_| {
+        let mut map = HashMap::new();
+        map.insert(
+            "data".to_string(),
+            String::from_utf8_lossy(bytes).to_string(),
+        );
+        map
+    })
 }
 
 fn stream_entry_to_redis_value(entry: &StreamId) -> Value {

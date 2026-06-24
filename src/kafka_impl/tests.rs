@@ -43,7 +43,7 @@ async fn kafka_consumer_and_producer() {
     let test_harness = KafkaTestHarness::with_topics(vec![topic.clone()]).await;
     let host = test_harness.host().await;
 
-    let mut test_sub = KafkaSubscriber::new(host.clone(), topic.clone());
+    let test_sub = KafkaSubscriber::new(host.clone(), topic.clone());
     let mut stream = test_sub.get_stream().await.unwrap();
 
     let message = StringMessage::from_value("testing".to_string());

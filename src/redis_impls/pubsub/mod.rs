@@ -13,10 +13,10 @@
 //! - Subscribers only observe messages published after subscription begins.
 
 use redis::{AsyncCommands, Client, FromRedisValue, Value};
-use tokio_stream::{Stream, StreamExt};
+use tokio_stream::StreamExt;
 
 use crate::redis_impls::get_connection;
-use crate::{Message, PubSubError, Publisher, Subscriber};
+use crate::{Message, MessageStream, PubSubError, Publisher, Subscriber};
 
 #[cfg(test)]
 mod tests;
@@ -31,7 +31,6 @@ pub struct RedisPublisher {
     topic: String,
 }
 
-#[async_trait::async_trait]
 impl Publisher for RedisPublisher {
     fn new(host: String, topic: String) -> Self {
         RedisPublisher { host, topic }
@@ -56,14 +55,16 @@ pub struct RedisSubscriber {
     topic: String,
 }
 
-impl RedisSubscriber {
-    async fn get_pubsub_stream<M: Message>(
-        &self,
-    ) -> Result<impl Stream<Item = Result<M, PubSubError>> + Unpin + Send, PubSubError> {
+impl Subscriber for RedisSubscriber {
+    fn new(host: String, topic: String) -> Self {
+        RedisSubscriber { host, topic }
+    }
+
+    async fn get_stream<M: Message + 'static>(&self) -> Result<MessageStream<M>, PubSubError> {
         let client = Client::open(self.host.as_str())?;
         let mut subscription = client.get_async_pubsub().await?;
         subscription.subscribe(self.topic.as_str()).await?;
-        Ok(subscription.into_on_message().map(|incoming| {
+        let stream = subscription.into_on_message().map(|incoming| {
             let payload: Value = incoming.get_payload()?;
             match payload {
                 Value::BulkString(bytes) => Ok(M::from_bytes(None, &bytes)),
@@ -72,19 +73,7 @@ impl RedisSubscriber {
                     Ok(M::from_bytes(None, &payload.into_bytes()))
                 }
             }
-        }))
-    }
-}
-
-#[async_trait::async_trait]
-impl Subscriber for RedisSubscriber {
-    fn new(host: String, topic: String) -> Self {
-        RedisSubscriber { host, topic }
-    }
-
-    async fn get_stream<M: Message>(
-        &mut self,
-    ) -> Result<impl Stream<Item = Result<M, PubSubError>> + Unpin + Send, PubSubError> {
-        self.get_pubsub_stream().await
+        });
+        Ok(Box::pin(stream))
     }
 }

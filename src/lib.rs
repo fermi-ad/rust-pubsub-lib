@@ -108,6 +108,7 @@
 use std::{
     error::Error,
     fmt::{Debug, Display, Formatter, Result as FmtResult},
+    pin::Pin,
 };
 
 use tokio_stream::Stream;
@@ -148,6 +149,8 @@ pub use redis_impls::testing_utils::TestHarness as RedisTestHarness;
 mod tests;
 
 const CANNED_ERR_MESSAGE: &str = "The PubSub library encountered an error.";
+
+pub type MessageStream<M> = Pin<Box<dyn Stream<Item = Result<M, PubSubError>> + Send + 'static>>;
 
 /// A trait describing a message from the pub/sub service.
 ///
@@ -224,7 +227,6 @@ pub trait Message: Clone + Debug + PartialEq + From<ByteMessage> + Send + Sync {
 ///
 /// Implementations usually encapsulate connection caching and reconnect behavior behind a backend-
 /// specific concrete type.
-#[async_trait::async_trait]
 pub trait Publisher: Debug {
     /// Configures a [`Publisher`] for the provided host and topic.
     fn new(host: String, topic: String) -> Self
@@ -233,7 +235,10 @@ pub trait Publisher: Debug {
 
     /// Sends the provided [`Message`] to the configured topic. If a call to this
     /// method fails, the Publisher will attempt to reconnect on the next call.
-    async fn publish<M: Message>(&self, message: M) -> Result<(), PubSubError>;
+    fn publish<'a, M: Message>(
+        &'a self,
+        message: M,
+    ) -> impl Future<Output = Result<(), PubSubError>> + Send + use<'a, Self, M>;
 }
 
 /// A trait for retrieving a backend-defined point-in-time view of [`Message`]s on a topic.
@@ -242,21 +247,22 @@ pub trait Publisher: Debug {
 /// without keeping a long-lived subscription open. The exact inclusion boundary is backend-
 /// specific: some implementations establish an upper bound first and then read up to that bound,
 /// while others directly enumerate the entries retained at read time.
-#[async_trait::async_trait]
 pub trait Snapshot {
     /// Retrieves a snapshot of a message topic.
     ///
     /// The returned [`Message`]s represent data retained and visible to the backend during the
     /// snapshot operation. Exact inclusion boundaries, ordering behavior, and interaction with
     /// concurrent publishes are backend-specific.
-    async fn get<M: Message>(host: String, topic: String) -> Result<Vec<M>, PubSubError>;
+    fn get<M: Message>(
+        host: String,
+        topic: String,
+    ) -> impl Future<Output = Result<Vec<M>, PubSubError>> + Send + use<Self, M>;
 }
 
 /// A trait for subscribing to a message topic.
 ///
 /// Implementations return a stream of results so callers can react to new messages over time
 /// without coupling themselves to a specific broker client library.
-#[async_trait::async_trait]
 pub trait Subscriber: Debug {
     /// Configures a [`Subscriber`] for the provided host and topic.
     ///
@@ -269,9 +275,9 @@ pub trait Subscriber: Debug {
     /// Streams [`Message`]s that appear on the subscribed topic.
     ///
     /// If an interruption occurs, the [`Subscriber`] attempts to reconnect on its own.
-    async fn get_stream<M: Message>(
-        &mut self,
-    ) -> Result<impl Stream<Item = Result<M, PubSubError>> + Unpin + Send, PubSubError>;
+    fn get_stream<'a, M: Message + 'static>(
+        &'a self,
+    ) -> impl Future<Output = Result<MessageStream<M>, PubSubError>> + Send + use<'a, Self, M>;
 }
 
 /// A [`Message`] containing already-serialized key and value bytes.
