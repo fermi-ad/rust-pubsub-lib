@@ -41,7 +41,10 @@ use redis::{AsyncCommands, FromRedisValue, Value};
 use tokio_stream::{Stream, StreamExt};
 
 use crate::redis_impls::{get_connection, redis_value_to_byte_message};
-use crate::{ByteMessage, Message, MessageStream, PubSubError, Publisher, Snapshot, Subscriber};
+use crate::{
+    ByteMessage, Message, MessageStream, PubSubError, Publisher, Snapshot, StringMessage,
+    Subscriber,
+};
 
 mod cache;
 mod runtime;
@@ -207,8 +210,8 @@ impl StreamMessage for MapMessage {
 
 // Implement StreamMessage for the other built-in Message types so they get the "data" fallback.
 // (The default method body handles this; these impls just opt the types in.)
-impl StreamMessage for crate::ByteMessage {}
-impl StreamMessage for crate::StringMessage {}
+impl StreamMessage for ByteMessage {}
+impl StreamMessage for StringMessage {}
 
 /// Redis-backed [`Publisher`](crate::Publisher) implementation that writes to Redis Streams via
 /// `XADD`.
@@ -378,7 +381,7 @@ impl Subscriber for RedisSubscriber {
     }
 
     async fn get_stream<M: Message + 'static>(&self) -> Result<MessageStream<M>, PubSubError> {
-        let stream = cache::get_redis_stream(self.host.clone(), self.topic.clone()).await;
+        let stream = cache::get_redis_stream(&self.host, &self.topic).await;
         Ok(Box::pin(Self::convert_stream::<M>(stream)))
     }
 }
@@ -419,10 +422,4 @@ fn stream_entry_to_redis_value(entry: &StreamId) -> Value {
 fn stream_entry_to_byte_message(entry: &StreamId) -> Result<ByteMessage, PubSubError> {
     let redis_value = stream_entry_to_redis_value(entry);
     redis_value_to_byte_message(&redis_value).map_err(PubSubError::from)
-}
-
-#[cfg(test)]
-fn stream_entry_to_json_bytes(entry: &StreamId) -> Result<Vec<u8>, PubSubError> {
-    let redis_value = stream_entry_to_redis_value(entry);
-    crate::redis_impls::redis_value_to_json_bytes(&redis_value).map_err(PubSubError::from)
 }

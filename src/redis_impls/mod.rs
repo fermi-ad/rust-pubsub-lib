@@ -130,3 +130,7 @@ async fn get_connection(host: &str) -> Result<ConnectionManager, PubSubError> {
         }
     }
 }
+
+async fn evict_connection(host: &str) {
+    HOST_MAP.write().await.remove(host);
+}

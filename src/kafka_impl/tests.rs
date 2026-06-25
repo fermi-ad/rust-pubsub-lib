@@ -11,9 +11,7 @@ use crate::{KafkaPublisher, KafkaTestHarness, StringMessage};
 
 #[test]
 fn format_kafka_publisher() {
-    let host = String::from("host");
-    let topic = String::from("topic");
-    let test_pub = KafkaPublisher::new(host.clone(), topic.clone());
+    let test_pub = KafkaPublisher::new("host".to_string(), "topic".to_string());
     assert_eq!(
         "KafkaPublisher { host: \"host\", topic: \"topic\" }",
         format!("{test_pub:?}")
@@ -22,8 +20,7 @@ fn format_kafka_publisher() {
 
 #[test]
 fn format_kafka_subscriber() {
-    let topic = String::from("topic");
-    let test_sub = KafkaSubscriber::new("host".to_string(), topic.clone());
+    let test_sub = KafkaSubscriber::new("host".to_string(), "topic".to_string());
     assert_eq!(
         "KafkaSubscriber { host: \"host\", topic: \"topic\" }",
         format!("{test_sub:?}")

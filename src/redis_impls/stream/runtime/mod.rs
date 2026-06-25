@@ -16,6 +16,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::error;
 
 use super::stream_entry_to_byte_message;
+use crate::redis_impls::{evict_connection, get_connection};
 use crate::{ByteMessage, PubSubError};
 
 /// Maximum exponential-backoff delay applied after connection-establishment failures.
@@ -98,15 +99,18 @@ async fn start_stream(
     let mut error_backoff_time = Duration::from_secs(1);
 
     while !cancel_token.is_cancelled() {
-        match super::super::get_connection(&host).await {
+        match get_connection(&host).await {
             Ok(mut conn) => {
-                let exited_cleanly = cancel_token
+                // Reset any error backoff, now that we have a connection
+                error_backoff_time = Duration::from_secs(1);
+
+                let ended_due_to_connection_err = cancel_token
                     .run_until_cancelled(monitor_stream(&mut conn, &topic, &sender))
                     .await
                     .is_some();
 
-                if exited_cleanly {
-                    error_backoff_time = Duration::from_secs(1);
+                if ended_due_to_connection_err {
+                    evict_connection(&host).await;
                 }
             }
             Err(err) => {
@@ -132,23 +136,16 @@ async fn monitor_stream(
             .await
         {
             Ok(reply) => {
-                let mut saw_message = false;
                 let entries = reply.keys.into_iter().flat_map(|stream| stream.ids);
                 for entry in entries {
-                    saw_message = true;
                     latest_id = entry.id.clone();
                     let message = stream_entry_to_byte_message(&entry);
                     let _ = sender.send(message);
                 }
-
-                if saw_message {
-                    continue;
-                }
             }
             Err(err) => {
-                let pubsub_err = PubSubError::from(err);
-                let _ = sender.send(Err(pubsub_err.clone()));
-                sleep(Duration::from_secs(1)).await;
+                let _ = sender.send(Err(PubSubError::from(err)));
+                break;
             }
         }
     }

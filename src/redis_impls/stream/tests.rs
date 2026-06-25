@@ -11,7 +11,9 @@ use tokio::time::{sleep, timeout};
 use tokio_stream::StreamExt;
 
 use super::*;
-use crate::{MapMessage, Message, RedisTestHarness, StringMessage};
+use crate::{
+    MapMessage, Message, RedisTestHarness, StringMessage, redis_impls::redis_value_to_json_bytes,
+};
 
 #[tokio::test]
 async fn redis_stream_publish_records_payload_on_mock_server() {
@@ -124,16 +126,16 @@ async fn redis_stream_fans_out_to_multiple_subscribers() {
 
 #[tokio::test]
 async fn redis_stream_reuses_one_cached_stream_per_host_and_topic() {
-    let host = "not-a-valid-redis-uri".to_string();
-    let topic = "shared-topic-reuse".to_string();
+    let host = "not-a-valid-redis-uri";
+    let topic = "shared-topic-reuse";
 
-    let first = cache::get_redis_stream(host.clone(), topic.clone()).await;
-    let second = cache::get_redis_stream(host.clone(), topic.clone()).await;
+    let first = cache::get_redis_stream(host, topic).await;
+    let second = cache::get_redis_stream(host, topic).await;
 
     drop(first);
     drop(second);
 
-    let subscriber = RedisSubscriber::new(host, topic);
+    let subscriber = RedisSubscriber::new(host.to_string(), topic.to_string());
     let mut stream = subscriber.get_stream::<StringMessage>().await.unwrap();
 
     let err = timeout(Duration::from_secs(5), stream.next())
@@ -160,17 +162,17 @@ async fn redis_stream_subscriber_new_does_not_start_work_eagerly() {
 
 #[tokio::test]
 async fn redis_stream_cached_stream_is_evicted_after_going_idle() {
-    let host = "not-a-valid-redis-uri".to_string();
-    let topic = "idle-topic-eviction".to_string();
+    let host = "not-a-valid-redis-uri";
+    let topic = "idle-topic-eviction";
 
     {
-        let stream = cache::get_redis_stream(host.clone(), topic.clone()).await;
+        let stream = cache::get_redis_stream(host, topic).await;
         drop(stream);
     }
 
     sleep(Duration::from_secs(4)).await;
 
-    let subscriber = RedisSubscriber::new(host, topic);
+    let subscriber = RedisSubscriber::new(host.to_string(), topic.to_string());
     let mut stream = subscriber.get_stream::<StringMessage>().await.unwrap();
 
     let err = timeout(Duration::from_secs(5), stream.next())
@@ -400,6 +402,11 @@ async fn set_exact_stream_max_len_is_respected_on_publish() {
 }
 
 // ── Existing stream-entry conversion tests ────────────────────────────────────
+
+fn stream_entry_to_json_bytes(entry: &StreamId) -> Result<Vec<u8>, PubSubError> {
+    let redis_value = stream_entry_to_redis_value(entry);
+    redis_value_to_json_bytes(&redis_value).map_err(PubSubError::from)
+}
 
 #[test]
 fn stream_entry_to_json_bytes_preserves_nested_shapes() {

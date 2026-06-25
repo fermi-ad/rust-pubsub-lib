@@ -15,8 +15,8 @@ async fn kafka_subscriber_shares_cached_stream_per_host_topic() {
     let test_harness = KafkaTestHarness::with_topics(vec![topic.to_string()]).await;
     let host = test_harness.host().await;
 
-    let first = KafkaSubscriber::new(host.clone(), topic.to_string());
-    let second = KafkaSubscriber::new(host.clone(), topic.to_string());
+    let first = KafkaSubscriber::new(host.to_string(), topic.to_string());
+    let second = KafkaSubscriber::new(host.to_string(), topic.to_string());
 
     let _stream_a = first.get_stream::<StringMessage>().await.unwrap();
     let _stream_b = second.get_stream::<StringMessage>().await.unwrap();

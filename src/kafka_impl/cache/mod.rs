@@ -55,6 +55,15 @@ impl<'a> ConsumerCacheKey<'a> {
     }
 }
 
+//                              -------- Cache entries --------
+//   Consumer "last used" values are only checked by the reaper process, behind a write lock.
+//   Therefore, the field is a plain u64 value.
+//
+//   Producer "last used" values must be updated on each read, as we don't have the same
+//   "check how many open streams there are" ability for producers as we do with consumers.
+//   Therefore, the field is an Arc<AtomicU64> so the last used time can be updated without
+//   write-locking the cache on every "get_producer" call.
+
 struct ConsumerCacheEntry {
     kafka_stream: KafkaStream,
     last_used_epoch_secs: u64,
