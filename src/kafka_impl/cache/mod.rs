@@ -5,6 +5,7 @@
 //! `(host, topic)` pairs. A background reaper removes idle entries after a grace period.
 
 use std::{
+    borrow::Cow,
     collections::HashMap,
     sync::{
         Arc, LazyLock,
@@ -27,12 +28,57 @@ const REAPER_INTERVAL: Duration = Duration::from_secs(10);
 /// Idle duration after which cached entries are evicted.
 const EVICT_AFTER_IDLE_SECS: u64 = 60;
 
+/// Cache key identifying a shared subscriber runtime by host and topic.
+/// Used exclusively within this module as an implementation detail of the runtime-wide cache.
+///
+/// Utilizes [`Cow`] fields so lookups only require borrowing a value, while inserting new
+/// Kafka handlers can easily convert to owned data.
+#[derive(Hash, PartialEq, Eq)]
+struct ConsumerCacheKey<'a> {
+    host: Cow<'a, str>,
+    topic: Cow<'a, str>,
+}
+
+impl<'a> ConsumerCacheKey<'a> {
+    fn new(host: &'a str, topic: &'a str) -> Self {
+        ConsumerCacheKey {
+            host: Cow::Borrowed(host),
+            topic: Cow::Borrowed(topic),
+        }
+    }
+
+    fn into_owned(self) -> ConsumerCacheKey<'static> {
+        ConsumerCacheKey {
+            host: Cow::Owned(self.host.into_owned()),
+            topic: Cow::Owned(self.topic.into_owned()),
+        }
+    }
+}
+
+//                              -------- Cache entries --------
+//   Consumer "last used" values are only checked by the reaper process, behind a write lock.
+//   Therefore, the field is a plain u64 value.
+//
+//   Producer "last used" values must be updated on each read, as we don't have the same
+//   "check how many open streams there are" ability for producers as we do with consumers.
+//   Therefore, the field is an Arc<AtomicU64> so the last used time can be updated without
+//   write-locking the cache on every "get_producer" call.
+
+struct ConsumerCacheEntry {
+    kafka_stream: KafkaStream,
+    last_used_epoch_secs: u64,
+}
+
+#[derive(Clone)]
+struct ProducerCacheEntry {
+    producer: FutureProducer,
+    last_used_epoch_secs: Arc<AtomicU64>,
+}
+
 /// Shared map of one Kafka [`FutureProducer`] per bootstrap host.
 type ProducerCache = RwLock<HashMap<String, ProducerCacheEntry>>;
-/// Cache key identifying a shared subscriber runtime by host and topic.
-type ConsumerCacheKey = (String, String);
 /// Shared map of Kafka subscriber runtimes indexed by [`ConsumerCacheKey`].
-type ConsumerCache = RwLock<HashMap<ConsumerCacheKey, ConsumerCacheEntry>>;
+type ConsumerCache = RwLock<HashMap<ConsumerCacheKey<'static>, ConsumerCacheEntry>>;
 
 /// Kafka producers are cached by bootstrap host across the process.
 static PRODUCER_MAP: LazyLock<ProducerCache> = LazyLock::new(RwLock::default);
@@ -46,8 +92,8 @@ static REAPER_STARTED: LazyLock<()> = LazyLock::new(|| {
 static START: LazyLock<Instant> = LazyLock::new(Instant::now);
 
 /// Returns the shared Kafka subscriber stream for a host/topic pair, creating it on first use.
-pub async fn get_kafka_stream(host: String, topic: String) -> BroadcastStream<ByteMessage> {
-    let key = (host.clone(), topic.clone());
+pub async fn get_kafka_stream(host: &str, topic: &str) -> BroadcastStream<ByteMessage> {
+    let key = ConsumerCacheKey::new(host, topic);
     if let Some(stream) = CONSUMER_MAP
         .read()
         .await
@@ -58,41 +104,43 @@ pub async fn get_kafka_stream(host: String, topic: String) -> BroadcastStream<By
     }
 
     let mut lock = CONSUMER_MAP.write().await;
-    lock.entry(key)
-        .or_insert_with(|| {
-            *REAPER_STARTED;
-            ConsumerCacheEntry {
-                kafka_stream: KafkaStream::new(host, topic),
-                last_used_epoch_secs: now_secs(),
-            }
-        })
-        .kafka_stream
-        .get_stream()
+    if let Some(entry) = lock.get(&key) {
+        entry.kafka_stream.get_stream()
+    } else {
+        *REAPER_STARTED;
+        let entry = ConsumerCacheEntry {
+            kafka_stream: KafkaStream::new(host.to_string(), topic.to_string()),
+            last_used_epoch_secs: now_secs(),
+        };
+        let stream = entry.kafka_stream.get_stream();
+        lock.insert(key.into_owned(), entry);
+        stream
+    }
 }
 
 /// Returns the cached Kafka producer for a bootstrap host, creating it on first use.
-pub async fn get_kafka_producer(host: String) -> Result<FutureProducer, PubSubError> {
+pub async fn get_kafka_producer(host: &str) -> Result<FutureProducer, PubSubError> {
     let now = now_secs();
 
     // Clone the entry under the read lock so `last_used_epoch_secs` (an `Arc<AtomicU64>`) can be
     // updated after the lock is dropped. Cloning is cheap: one `Arc` refcount bump plus an
     // rdkafka-internal `Arc` clone for the `FutureProducer`.
-    let read_result = PRODUCER_MAP.read().await.get(&host).cloned();
+    let read_result = PRODUCER_MAP.read().await.get(host).cloned();
     if let Some(entry) = read_result {
         entry.last_used_epoch_secs.store(now, Ordering::Relaxed);
         return Ok(entry.producer);
     }
 
     let mut lock = PRODUCER_MAP.write().await;
-    if let Some(entry) = lock.get(&host) {
+    if let Some(entry) = lock.get(host) {
         entry.last_used_epoch_secs.store(now, Ordering::Relaxed);
         Ok(entry.producer.clone())
     } else {
         let default: FutureProducer = ClientConfig::new()
-            .set("bootstrap.servers", &host)
+            .set("bootstrap.servers", host)
             .create()?;
         lock.insert(
-            host,
+            host.to_string(),
             ProducerCacheEntry {
                 producer: default.clone(),
                 last_used_epoch_secs: Arc::new(AtomicU64::new(now)),
@@ -103,16 +151,6 @@ pub async fn get_kafka_producer(host: String) -> Result<FutureProducer, PubSubEr
         *REAPER_STARTED;
         Ok(default)
     }
-}
-
-struct ConsumerCacheEntry {
-    kafka_stream: KafkaStream,
-    last_used_epoch_secs: u64,
-}
-#[derive(Clone)]
-struct ProducerCacheEntry {
-    producer: FutureProducer,
-    last_used_epoch_secs: Arc<AtomicU64>,
 }
 
 fn now_secs() -> u64 {

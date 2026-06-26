@@ -23,7 +23,7 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{Stream, StreamExt};
 use uuid::Uuid;
 
-use crate::{ByteMessage, Message, PubSubError, Publisher, Snapshot, Subscriber};
+use crate::{ByteMessage, Message, MessageStream, PubSubError, Publisher, Snapshot, Subscriber};
 
 #[cfg(any(feature = "testing-utils", test))]
 pub mod testing_utils;
@@ -45,14 +45,13 @@ pub struct KafkaPublisher {
     topic: String,
 }
 
-#[async_trait::async_trait]
 impl Publisher for KafkaPublisher {
     fn new(host: String, topic: String) -> Self {
         Self { host, topic }
     }
 
     async fn publish<M: Message>(&self, message: M) -> Result<(), PubSubError> {
-        let producer = cache::get_kafka_producer(self.host.clone()).await?;
+        let producer = cache::get_kafka_producer(&self.host).await?;
         let bytes = message.into_bytes();
         let mut record = FutureRecord::to(&self.topic).payload(&bytes.value);
         if let Some(key) = &bytes.key {
@@ -129,7 +128,6 @@ impl KafkaSnapshot {
     }
 }
 
-#[async_trait::async_trait]
 impl Snapshot for KafkaSnapshot {
     async fn get<M: Message>(host: String, topic: String) -> Result<Vec<M>, PubSubError> {
         let consumer = Self::configure_consumer(&host, &topic)?;
@@ -171,26 +169,11 @@ pub struct KafkaSubscriber {
 impl KafkaSubscriber {
     fn convert_stream<M: Message>(
         stream: BroadcastStream<ByteMessage>,
-    ) -> impl Stream<Item = Result<M, PubSubError>> + Unpin + Send {
+    ) -> impl Stream<Item = Result<M, PubSubError>> + Send {
         stream.map(|incoming| match incoming {
             Ok(msg) => Ok(M::from(msg)),
             Err(err) => Err(PubSubError::from_debug(err)),
         })
-    }
-}
-
-#[async_trait::async_trait]
-impl Subscriber for KafkaSubscriber {
-    fn new(host: String, topic: String) -> Self {
-        Self { host, topic }
-    }
-
-    async fn get_stream<M: Message>(
-        &mut self,
-    ) -> Result<impl Stream<Item = Result<M, PubSubError>> + Unpin + Send, PubSubError> {
-        Ok(Self::convert_stream::<M>(
-            cache::get_kafka_stream(self.host.clone(), self.topic.clone()).await,
-        ))
     }
 }
 
@@ -200,6 +183,18 @@ impl Debug for KafkaSubscriber {
             .field("host", &self.host)
             .field("topic", &self.topic)
             .finish()
+    }
+}
+
+impl Subscriber for KafkaSubscriber {
+    fn new(host: String, topic: String) -> Self {
+        Self { host, topic }
+    }
+
+    async fn get_stream<M: Message + 'static>(&self) -> Result<MessageStream<M>, PubSubError> {
+        let stream =
+            Self::convert_stream::<M>(cache::get_kafka_stream(&self.host, &self.topic).await);
+        Ok(Box::pin(stream))
     }
 }
 

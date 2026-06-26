@@ -52,7 +52,7 @@ async fn test_subscribe_plain_string_payload_round_trips() {
         vec!["Hello, Redis PubSub!".to_string()],
     )])))
     .await;
-    let mut subscriber = RedisSubscriber::new(context.get_host(), "test-topic".to_string());
+    let subscriber = RedisSubscriber::new(context.get_host(), "test-topic".to_string());
 
     let message = timeout(
         Duration::from_secs(5),
@@ -80,7 +80,7 @@ async fn test_subscribe_receives_multiple_messages_in_order() {
         ],
     )])))
     .await;
-    let mut subscriber = RedisSubscriber::new(context.get_host(), "ordered-topic".to_string());
+    let subscriber = RedisSubscriber::new(context.get_host(), "ordered-topic".to_string());
 
     let received = timeout(
         Duration::from_secs(5),
@@ -111,7 +111,7 @@ async fn test_subscribe_json_looking_payload_remains_plain_text() {
         vec![json_text.clone()],
     )])))
     .await;
-    let mut subscriber = RedisSubscriber::new(context.get_host(), "json-payload-topic".to_string());
+    let subscriber = RedisSubscriber::new(context.get_host(), "json-payload-topic".to_string());
 
     let message = timeout(
         Duration::from_secs(5),
@@ -132,8 +132,7 @@ async fn test_subscribe_json_looking_payload_remains_plain_text() {
 
 #[tokio::test]
 async fn test_subscribe_fails_for_invalid_host() {
-    let mut subscriber =
-        RedisSubscriber::new("not-a-valid-redis-uri".to_string(), "topic".to_string());
+    let subscriber = RedisSubscriber::new("not-a-valid-redis-uri".to_string(), "topic".to_string());
     let result = subscriber.get_stream::<StringMessage>().await;
     assert!(result.is_err());
 
