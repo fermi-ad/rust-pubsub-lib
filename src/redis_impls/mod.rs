@@ -112,7 +112,7 @@ pub(crate) fn redis_value_to_byte_message(value: &Value) -> Result<ByteMessage, 
     Ok(ByteMessage::from_value(payload))
 }
 
-async fn get_connection(host: &str) -> Result<ConnectionManager, PubSubError> {
+pub(crate) async fn get_connection(host: &str) -> Result<ConnectionManager, RedisError> {
     let naive_read = HOST_MAP.read().await.get(host).cloned();
     match naive_read {
         Some(conn) => Ok(conn),

@@ -8,7 +8,8 @@ The primary abstractions provided by this library are the [`Publisher`](src/lib.
 
 - [`Publisher`](src/lib.rs) asynchronously sends a message to a configured topic.
 - [`Snapshot`](src/lib.rs) reads the currently available messages for a topic in one operation.
-- [`Subscriber`](src/lib.rs) yields a stream of messages as they arrive.
+- [`Subscriber`](src/lib.rs) yields a stream of messages as they arrive. Backend errors are handled
+  internally; the stream yields only successfully decoded messages.
 - [`Message`](src/lib.rs) describes the message shape used across all backends.
 
 The library also provides concrete message helpers:
@@ -24,13 +25,23 @@ Select one or more crate features depending on the broker backend your applicati
 - `redis-stream`: enables [`redis_impls::stream`](src/redis_impls/stream/mod.rs) with Redis Stream implementations of [`Publisher`](src/lib.rs), [`Snapshot`](src/lib.rs), and [`Subscriber`](src/lib.rs).
 - `testing-utils`: enables backend-specific test harness helpers such as [`kafka_impl::testing_utils`](src/kafka_impl/testing_utils/mod.rs) for tests that exercise broker-facing code.
 
-## Required environment variables
+## Shared subscriber cache
 
-The following environment variables are required for Kafka-backed behavior:
+All three streaming backends (Kafka, Redis pub/sub, and Redis Stream) share a single process-wide
+runtime cache in [`src/cache.rs`](src/cache.rs). Each `(host, topic)` pair reuses one background
+task rather than spinning up a new connection per subscriber. Idle runtimes are evicted
+automatically after a grace period once they have no active listeners.
 
-- `KAFKA_CONNECTION_SECONDS`: controls the timeout used by Kafka operations in [`get_kafka_timeout_val()`](src/kafka_impl/mod.rs).
+## Environment variables
 
-Redis-backed implementations do not currently require a crate-specific environment variable, but they do require a valid Redis connection URI to be passed to [`Publisher::new()`](src/lib.rs), [`Snapshot::get()`](src/lib.rs), or [`Subscriber::new()`](src/lib.rs).
+The following environment variables are read by the Kafka backend:
+
+- `KAFKA_CONNECTION_SECONDS`: controls the timeout used by Kafka operations in
+  [`get_kafka_timeout_val()`](src/kafka_impl/mod.rs). Defaults to `1` second if not set.
+
+Redis-backed implementations do not read any crate-specific environment variables, but they do
+require a valid Redis connection URI to be passed to [`Publisher::new()`](src/lib.rs),
+[`Snapshot::get()`](src/lib.rs), or [`Subscriber::new()`](src/lib.rs).
 
 ## Documentation
 
@@ -40,9 +51,8 @@ Generate the crate documentation locally with [`cargo doc --all-features`](Cargo
 
 The following packages must be present on the host machine when building this library:
 
-- `cmake`
-- `libcurl4-openssl-dev`
-- `libsasl2-dev`
-- `zlib`
+- `cmake` (Or equivalent CMake provider)
+- `gcc`/`g++` (Or equivalent C/C++ compiler/linker)
+- `libcurl4-openssl-dev` (Or equivalent `curl` dev files)
 
 The configured Dev Container in [`.devcontainer/`](.devcontainer/) has the necessary tools to build without additional installation.

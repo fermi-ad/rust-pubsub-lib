@@ -8,7 +8,7 @@
 //! streams are eventually cleaned up by an internal reaper task.
 
 use std::collections::HashMap;
-use std::fmt::{Debug, Formatter, Result as FmtResult};
+use std::fmt::Debug;
 use std::time::Duration;
 
 use rdkafka::consumer::{Consumer, StreamConsumer};
@@ -19,27 +19,34 @@ use rdkafka::types::RDKafkaErrorCode;
 use rdkafka::{ClientConfig, Message as RdMessage};
 use rust_env_var_lib::env_var;
 use tokio::time::timeout;
-use tokio_stream::wrappers::BroadcastStream;
-use tokio_stream::{Stream, StreamExt};
+use tokio_stream::StreamExt;
 use uuid::Uuid;
 
-use crate::{ByteMessage, Message, MessageStream, PubSubError, Publisher, Snapshot, Subscriber};
+use crate::cache::{self, Source};
+use crate::{Message, MessageStream, PubSubError, Publisher, Snapshot, Subscriber};
 
 #[cfg(any(feature = "testing-utils", test))]
 pub mod testing_utils;
 
-mod cache;
-mod stream;
+mod kafka_cache;
+mod runtime;
 
 #[cfg(test)]
 mod tests;
 
 const SNAPSHOT_MESSAGE_TIMEOUT: Duration = Duration::from_secs(5);
 
+impl From<KafkaError> for PubSubError {
+    fn from(value: KafkaError) -> Self {
+        PubSubError::from_debug(value)
+    }
+}
+
 /// Kafka implementation of [`Publisher`](crate::Publisher).
 ///
 /// Producers are cached per Kafka bootstrap host so repeated publishes can reuse an existing
 /// connection instead of constructing a fresh producer every time.
+#[derive(Debug)]
 pub struct KafkaPublisher {
     host: String,
     topic: String,
@@ -51,7 +58,7 @@ impl Publisher for KafkaPublisher {
     }
 
     async fn publish<M: Message>(&self, message: M) -> Result<(), PubSubError> {
-        let producer = cache::get_kafka_producer(&self.host).await?;
+        let producer = kafka_cache::get_kafka_producer(&self.host).await?;
         let bytes = message.into_bytes();
         let mut record = FutureRecord::to(&self.topic).payload(&bytes.value);
         if let Some(key) = &bytes.key {
@@ -61,21 +68,6 @@ impl Publisher for KafkaPublisher {
             Ok(_) => Ok(()),
             Err((err, _)) => Err(PubSubError::from(err)),
         }
-    }
-}
-
-impl Debug for KafkaPublisher {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        f.debug_struct("KafkaPublisher")
-            .field("host", &self.host)
-            .field("topic", &self.topic)
-            .finish()
-    }
-}
-
-impl From<KafkaError> for PubSubError {
-    fn from(value: KafkaError) -> Self {
-        PubSubError::from_debug(value)
     }
 }
 
@@ -155,35 +147,16 @@ impl Snapshot for KafkaSnapshot {
 
 /// Kafka implementation of [`Subscriber`](crate::Subscriber).
 ///
-/// Subscribers reuse a shared [`KafkaStream`](stream::KafkaStream) per host/topic pair. This avoids
-/// spinning up duplicate consumers when multiple callers subscribe to the same Kafka topic inside a
-/// single process.
+/// Subscribers share a single cached background consumer runtime per host/topic pair within the
+/// process. Multiple callers subscribing to the same Kafka topic reuse the same connection rather
+/// than spinning up duplicate consumers.
 ///
 /// Constructing a subscriber is side-effect free; the shared background consumer runtime is started
 /// lazily by the first call to [`Subscriber::get_stream()`](crate::Subscriber::get_stream).
+#[derive(Debug)]
 pub struct KafkaSubscriber {
     host: String,
     topic: String,
-}
-
-impl KafkaSubscriber {
-    fn convert_stream<M: Message>(
-        stream: BroadcastStream<ByteMessage>,
-    ) -> impl Stream<Item = Result<M, PubSubError>> + Send {
-        stream.map(|incoming| match incoming {
-            Ok(msg) => Ok(M::from(msg)),
-            Err(err) => Err(PubSubError::from_debug(err)),
-        })
-    }
-}
-
-impl Debug for KafkaSubscriber {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        f.debug_struct("KafkaSubscriber")
-            .field("host", &self.host)
-            .field("topic", &self.topic)
-            .finish()
-    }
 }
 
 impl Subscriber for KafkaSubscriber {
@@ -191,10 +164,14 @@ impl Subscriber for KafkaSubscriber {
         Self { host, topic }
     }
 
-    async fn get_stream<M: Message + 'static>(&self) -> Result<MessageStream<M>, PubSubError> {
-        let stream =
-            Self::convert_stream::<M>(cache::get_kafka_stream(&self.host, &self.topic).await);
-        Ok(Box::pin(stream))
+    async fn get_stream<M: Message + 'static>(&self) -> MessageStream<M> {
+        cache::get_stream(
+            &self.host,
+            &self.topic,
+            Source::Kafka,
+            runtime::start_stream,
+        )
+        .await
     }
 }
 

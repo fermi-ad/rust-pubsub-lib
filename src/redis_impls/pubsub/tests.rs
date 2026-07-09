@@ -9,7 +9,7 @@ use tokio::time::timeout;
 use tokio_stream::StreamExt;
 
 use super::*;
-use crate::{Message, RedisTestHarness, StringMessage};
+use crate::{RedisTestHarness, StringMessage};
 
 #[tokio::test]
 async fn test_publish() {
@@ -59,9 +59,8 @@ async fn test_subscribe_plain_string_payload_round_trips() {
         subscriber
             .get_stream::<StringMessage>()
             .await
-            .unwrap()
             .take(1)
-            .all(|item| item.is_ok_and(|msg| msg.value_ref() == "Hello, Redis PubSub!")),
+            .all(|msg| msg.value_ref() == "Hello, Redis PubSub!"),
     )
     .await
     .unwrap();
@@ -87,16 +86,14 @@ async fn test_subscribe_receives_multiple_messages_in_order() {
         subscriber
             .get_stream::<StringMessage>()
             .await
-            .unwrap()
             .take(3)
-            .collect::<Vec<Result<StringMessage, PubSubError>>>(),
+            .collect::<Vec<StringMessage>>(),
     )
     .await
     .unwrap();
 
     let messages = received
         .into_iter()
-        .map(Result::unwrap)
         .map(StringMessage::extract_value)
         .collect::<Vec<_>>();
 
@@ -118,24 +115,12 @@ async fn test_subscribe_json_looking_payload_remains_plain_text() {
         subscriber
             .get_stream::<StringMessage>()
             .await
-            .unwrap()
             .take(1)
             .next(),
     )
     .await
     .unwrap()
-    .unwrap()
     .unwrap();
 
     assert_eq!(json_text, message.extract_value());
-}
-
-#[tokio::test]
-async fn test_subscribe_fails_for_invalid_host() {
-    let subscriber = RedisSubscriber::new("not-a-valid-redis-uri".to_string(), "topic".to_string());
-    let result = subscriber.get_stream::<StringMessage>().await;
-    assert!(result.is_err());
-
-    let err = result.err().unwrap();
-    assert!(format!("{err}").contains("The PubSub library encountered an error."));
 }

@@ -41,13 +41,13 @@ async fn kafka_consumer_and_producer() {
     let host = test_harness.host().await;
 
     let test_sub = KafkaSubscriber::new(host.clone(), topic.clone());
-    let mut stream = test_sub.get_stream().await.unwrap();
+    let mut stream = test_sub.get_stream::<StringMessage>().await;
 
     let message = StringMessage::from_value("testing".to_string());
     let test_pub = KafkaPublisher::new(host, topic);
     test_pub.publish(message.clone()).await.unwrap();
 
-    assert_eq!(message, stream.next().await.unwrap().unwrap());
+    assert_eq!(message, stream.next().await.unwrap());
 }
 
 #[tokio::test]

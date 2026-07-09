@@ -89,7 +89,7 @@
 //! # Ok::<(), rust_pubsub_lib::PubSubError>(())
 //! ```
 //!
-//! A subscriber yields a stream of results over time:
+//! A subscriber yields a stream of messages over time:
 //!
 //! ```ignore
 //! use rust_pubsub_lib::RedisPubSubSubscriber;
@@ -100,8 +100,8 @@
 //!     "redis://127.0.0.1:6379".to_string(),
 //!     "events".to_string(),
 //! );
-//! let mut stream = subscriber.get_stream::<StringMessage>().await?;
-//! let _next_message = stream.next().await;
+//! let mut stream = subscriber.get_stream::<StringMessage>().await;
+//! let _next_message: Option<StringMessage> = stream.next().await;
 //! # Ok::<(), rust_pubsub_lib::PubSubError>(())
 //! ```
 
@@ -112,6 +112,22 @@ use std::{
 };
 
 use tokio_stream::Stream;
+
+#[cfg(any(
+    feature = "kafka",
+    feature = "redis-pubsub",
+    feature = "redis-stream",
+    test
+))]
+pub(crate) mod backoff;
+
+#[cfg(any(
+    feature = "kafka",
+    feature = "redis-pubsub",
+    feature = "redis-stream",
+    test
+))]
+pub(crate) mod cache;
 
 #[cfg(any(feature = "kafka", test))]
 pub mod kafka_impl;
@@ -150,7 +166,7 @@ mod tests;
 
 const CANNED_ERR_MESSAGE: &str = "The PubSub library encountered an error.";
 
-pub type MessageStream<M> = Pin<Box<dyn Stream<Item = Result<M, PubSubError>> + Send + 'static>>;
+pub type MessageStream<M> = Pin<Box<dyn Stream<Item = M> + Send + 'static>>;
 
 /// A trait describing a message from the pub/sub service.
 ///
@@ -261,8 +277,16 @@ pub trait Snapshot {
 
 /// A trait for subscribing to a message topic.
 ///
-/// Implementations return a stream of results so callers can react to new messages over time
+/// Implementations return a stream of messages so callers can react to new messages over time
 /// without coupling themselves to a specific broker client library.
+///
+/// Connection errors and broker-level failures are handled internally by each backend. The library
+/// logs errors, applies exponential backoff, and reconnects automatically. Callers receive only
+/// successfully decoded messages; no error handling is required on the stream itself.
+///
+/// If the consumer falls behind the internal broadcast buffer, messages may be silently dropped.
+/// A warning is logged when this occurs. Callers that require guaranteed delivery should use the
+/// corresponding [`Snapshot`] implementation to re-hydrate missed state.
 pub trait Subscriber: Debug {
     /// Configures a [`Subscriber`] for the provided host and topic.
     ///
@@ -272,12 +296,14 @@ pub trait Subscriber: Debug {
     where
         Self: Sized;
 
-    /// Streams [`Message`]s that appear on the subscribed topic.
+    /// Returns a stream of [`Message`]s published to the subscribed topic.
     ///
-    /// If an interruption occurs, the [`Subscriber`] attempts to reconnect on its own.
+    /// Each item yielded by the stream is a successfully decoded message. Backend errors are
+    /// absorbed internally: the library logs them, applies backoff, and reconnects without
+    /// surfacing error items to the caller.
     fn get_stream<'a, M: Message + 'static>(
         &'a self,
-    ) -> impl Future<Output = Result<MessageStream<M>, PubSubError>> + Send + use<'a, Self, M>;
+    ) -> impl Future<Output = MessageStream<M>> + Send + use<'a, Self, M>;
 }
 
 /// A [`Message`] containing already-serialized key and value bytes.
