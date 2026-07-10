@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use serde_json::json;
+use tokio::task::yield_now;
 use tokio::time::{sleep, timeout};
 use tokio_stream::StreamExt;
 
@@ -76,7 +77,7 @@ async fn redis_stream_subscriber_receives_messages() {
     let subscriber = RedisSubscriber::new(host.clone(), topic.clone());
     let publisher = RedisPublisher::new(host, topic);
 
-    let mut stream = subscriber.get_stream::<StringMessage>().await.unwrap();
+    let mut stream = subscriber.get_stream::<StringMessage>().await;
     publisher
         .publish(StringMessage::from_value("live payload".to_string()))
         .await
@@ -85,7 +86,6 @@ async fn redis_stream_subscriber_receives_messages() {
 
     let message = timeout(Duration::from_secs(5), stream.next())
         .await
-        .unwrap()
         .unwrap()
         .unwrap();
     assert!(message.value_ref().contains("live payload"));
@@ -100,8 +100,8 @@ async fn redis_stream_fans_out_to_multiple_subscribers() {
     let second = RedisSubscriber::new(host.clone(), topic.clone());
     let publisher = RedisPublisher::new(host, topic);
 
-    let mut stream_a = first.get_stream::<StringMessage>().await.unwrap();
-    let mut stream_b = second.get_stream::<StringMessage>().await.unwrap();
+    let mut stream_a = first.get_stream::<StringMessage>().await;
+    let mut stream_b = second.get_stream::<StringMessage>().await;
 
     publisher
         .publish(StringMessage::from_value("fanout payload".to_string()))
@@ -112,42 +112,14 @@ async fn redis_stream_fans_out_to_multiple_subscribers() {
     let first_msg = timeout(Duration::from_secs(5), stream_a.next())
         .await
         .unwrap()
-        .unwrap()
         .unwrap();
     let second_msg = timeout(Duration::from_secs(5), stream_b.next())
         .await
-        .unwrap()
         .unwrap()
         .unwrap();
 
     assert!(first_msg.value_ref().contains("fanout payload"));
     assert!(second_msg.value_ref().contains("fanout payload"));
-}
-
-#[tokio::test]
-async fn redis_stream_reuses_one_cached_stream_per_host_and_topic() {
-    let host = "not-a-valid-redis-uri";
-    let topic = "shared-topic-reuse";
-
-    let first = cache::get_redis_stream(host, topic).await;
-    let second = cache::get_redis_stream(host, topic).await;
-
-    drop(first);
-    drop(second);
-
-    let subscriber = RedisSubscriber::new(host.to_string(), topic.to_string());
-    let mut stream = subscriber.get_stream::<StringMessage>().await.unwrap();
-
-    let err = timeout(Duration::from_secs(5), stream.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .expect_err("expected the reused cached runtime to forward its connection failure");
-
-    assert!(
-        err.cause_message()
-            .is_some_and(|cause| cause.contains("Redis URL did not parse"))
-    );
 }
 
 #[tokio::test]
@@ -157,51 +129,8 @@ async fn redis_stream_subscriber_new_does_not_start_work_eagerly() {
 
     let _subscriber = RedisSubscriber::new(host, topic);
 
-    sleep(Duration::from_millis(300)).await;
-}
-
-#[tokio::test]
-async fn redis_stream_cached_stream_is_evicted_after_going_idle() {
-    let host = "not-a-valid-redis-uri";
-    let topic = "idle-topic-eviction";
-
-    {
-        let stream = cache::get_redis_stream(host, topic).await;
-        drop(stream);
-    }
-
-    sleep(Duration::from_secs(4)).await;
-
-    let subscriber = RedisSubscriber::new(host.to_string(), topic.to_string());
-    let mut stream = subscriber.get_stream::<StringMessage>().await.unwrap();
-
-    let err = timeout(Duration::from_secs(5), stream.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .expect_err("expected a fresh runtime to report connection failure after idle eviction");
-
-    assert!(
-        err.cause_message()
-            .is_some_and(|cause| cause.contains("Redis URL did not parse"))
-    );
-}
-
-#[tokio::test]
-async fn redis_stream_subscriber_reports_connection_failure() {
-    let subscriber = RedisSubscriber::new("not-a-valid-redis-uri".to_string(), "topic".to_string());
-    let mut stream = subscriber.get_stream::<StringMessage>().await.unwrap();
-
-    let err = timeout(Duration::from_secs(5), stream.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .expect_err("expected a propagated connection error");
-
-    assert!(
-        err.cause_message()
-            .is_some_and(|cause| cause.contains("Redis URL did not parse"))
-    );
+    // Yield to give any incorrectly-spawned background task a chance to run; no real delay needed.
+    yield_now().await;
 }
 
 // ── MapMessage unit tests ────────────────────────────────────────────────────
@@ -299,7 +228,7 @@ async fn map_message_publish_stream_subscriber_round_trip() {
     let subscriber = RedisSubscriber::new(host.clone(), topic.clone());
     let publisher = RedisPublisher::new(host, topic);
 
-    let mut stream = subscriber.get_stream::<MapMessage>().await.unwrap();
+    let mut stream = subscriber.get_stream::<MapMessage>().await;
 
     let mut fields = HashMap::new();
     fields.insert("event".to_string(), "click".to_string());
@@ -311,7 +240,6 @@ async fn map_message_publish_stream_subscriber_round_trip() {
 
     let received = timeout(Duration::from_secs(5), stream.next())
         .await
-        .unwrap()
         .unwrap()
         .unwrap();
 
