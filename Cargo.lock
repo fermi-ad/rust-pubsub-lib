@@ -562,8 +562,8 @@ dependencies = [
 
 [[package]]
 name = "rust-env-var-lib"
-version = "1.2.0"
-source = "git+https://github.com/fermi-ad/rust-env-var-lib.git?tag=v1.2.0#e16b7318d57166589972a81470ccfad01a749967"
+version = "1.2.1"
+source = "git+https://github.com/fermi-ad/rust-env-var-lib.git?tag=v1.2.1#3703bdc0a6ce2870227aa9bdd14c1144ece887ec"
 dependencies = [
  "tracing",
 ]
