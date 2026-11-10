@@ -11,6 +11,11 @@ All notable changes to this project will be documented in this file.
   `adregistry.fnal.gov/dev-containers/rust-with-c:1.97.0-curl`. This pulls in the latest Rust
   toolchain and moves to the common Rust image used across all Rust projects in the org. The
   common image includes the C build tools still required to compile `rdkafka`.
+- **CI/CD migrated to v2 shared workflows:** The test/coverage job now uses
+  `fermi-ad/.github/.github/workflows/rust-integration.yaml@swb_v2`, and the docs job moves from
+  the SHA-pinned `deploy-rust-docs.yaml` to `rust-deployment.yaml@swb_v2` (with `docs: true` and
+  `image: false`). The per-repo `static-dependencies` input (`libcurl4-openssl-dev libsasl2-dev`)
+  is no longer passed, because the v2 workflows build on the common Rust image.
 - **Fix latent linting error.** A line in `src/tests.rs` used `format!` on a `&'static str` value just to call `assert_eq!` on it and another `String`. The `format!` was unnecessary, and `clippy` flagged it.
 
 ### Dependency Updates
