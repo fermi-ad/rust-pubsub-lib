@@ -11,6 +11,7 @@ All notable changes to this project will be documented in this file.
   `adregistry.fnal.gov/dev-containers/rust-with-c:1.97.0-curl`. This pulls in the latest Rust
   toolchain and moves to the common Rust image used across all Rust projects in the org. The
   common image includes the C build tools still required to compile `rdkafka`.
+- **Fix latent linting error.** A line in `src/tests.rs` used `format!` on a `&'static str` value just to call `assert_eq!` on it and another `String`. The `format!` was unnecessary, and `clippy` flagged it.
 
 ### Dependency Updates
 
