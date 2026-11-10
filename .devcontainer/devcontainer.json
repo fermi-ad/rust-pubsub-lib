@@ -1,10 +1,11 @@
 {
     "name": "Rust",
-    "image": "adregistry.fnal.gov/dev-containers/rust-with-c:1.97.0-curl",
+    "image": "adregistry.fnal.gov/dev-containers/rust:1.99.1",
     "customizations": {
         "vscode": {
             "extensions": [
-                "rust-lang.rust-analyzer"
+                "rust-lang.rust-analyzer",
+				"zoocodeorganization.zoo-code"
             ],
             "settings": {
                 "debug.openDebug": "openOnDebugBreak",
