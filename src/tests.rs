@@ -90,7 +90,7 @@ fn pubsub_error_default_and_display_without_cause() {
 fn pubsub_error_from_debug_captures_debug_cause() {
     let err = PubSubError::from_debug(PubSubError::default());
     assert_eq!(Some("PubSubError { cause: None }"), err.cause_message());
-    assert_eq!(format!("{CANNED_ERR_MESSAGE}"), format!("{err}"));
+    assert_eq!(CANNED_ERR_MESSAGE, format!("{err}"));
     assert_eq!(
         "PubSubError { cause: Some(\"PubSubError { cause: None }\") }",
         format!("{err:?}")

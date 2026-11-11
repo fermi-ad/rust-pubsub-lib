@@ -2,6 +2,59 @@
 
 All notable changes to this project will be documented in this file.
 
+## [10.0.1]
+
+### Improvements
+
+- **Dev container image updated:** The dev container now uses
+  `adregistry.fnal.gov/dev-containers/rust:1.99.1` instead of
+  `adregistry.fnal.gov/dev-containers/rust-with-c:1.97.0-curl`. This pulls in the latest Rust
+  toolchain and moves to the common Rust image used across all Rust projects in the org. The
+  common image includes the C build tools still required to compile `rdkafka`.
+- **CI/CD migrated to v2 shared workflows:** The test/coverage job now uses
+  `fermi-ad/.github/.github/workflows/rust-integration.yaml@swb_v2`, and the docs job moves from
+  the SHA-pinned `deploy-rust-docs.yaml` to `rust-deployment.yaml@swb_v2` (with `docs: true` and
+  `image: false`). The per-repo `static-dependencies` input (`libcurl4-openssl-dev libsasl2-dev`)
+  is no longer passed, because the v2 workflows build on the common Rust image.
+- **Fix latent linting error.** A line in `src/tests.rs` used `format!` on a `&'static str` value just to call `assert_eq!` on it and another `String`. The `format!` was unnecessary, and `clippy` flagged it.
+
+### Dependency Updates
+
+- `rust-env-var-lib` v1.2.0 → v1.2.1
+- `redis` 1.4.1 → 1.8.1
+- `tokio` 1.53.1 → 1.54.1
+- `tokio-macros` 2.7.0 → 2.7.2
+- `tokio-util` 0.7.19 → 0.7.20
+- `serde_json` 1.0.151 → 1.0.154
+- `serde` / `serde_core` / `serde_derive` 1.0.228 → 1.0.229
+- `uuid` 1.24.0 → 1.29.2
+- `futures-*` 0.3.32 → 0.3.34
+- `arc-swap` 1.9.2 → 1.9.5
+- `async-lock` 3.4.2 → 3.5.0
+- `cc` 1.2.66 → 1.11.1
+- `combine` 4.6.7 → 4.6.9
+- `event-listener` 5.4.1 → 5.4.2
+- `fastrand` 2.4.1 → 2.5.0
+- `indexmap` 2.14.0 → 2.14.2
+- `libc` 0.2.186 → 0.2.191
+- `libz-sys` 1.1.29 → 1.1.33
+- `log` 0.4.33 → 0.4.35
+- `mio` 1.2.1 → 1.2.4
+- `smallvec` 1.15.2 → 1.16.5
+- `socket2` 0.6.4 → 0.6.5
+- `synstructure` 0.13.2 → 0.14.0
+- `icu_*` 2.2.0 → 2.4.0
+- `wasm-bindgen` 0.2.126 → 0.2.130
+- `xxhash-rust` 0.8.16 → 0.8.19
+- `syn` 2.0.118 → 2.0.119; `syn` 3.0.10 added (used by updated proc-macro crates)
+- Added `utf_types` 1.0.0 (transitive)
+- Removed `concurrent-queue` and `crossbeam-utils` (no longer required by `event-listener`)
+- Other minor transitive updates: `cfg-if`, `displaydoc`, `equivalent`, `find-msvc-tools`,
+  `itoa`, `js-sys`, `litemap`, `pkg-config`, `potential_utf`, `proc-macro2`, `quote`, `tinystr`,
+  `toml_datetime`, `toml_edit`, `toml_parser`, `unicode-ident`, `utf8_iter`, `winnow`,
+  `writeable`, `yoke`, `yoke-derive`, `zerofrom-derive`, `zerotrie`, `zerovec`,
+  `zerovec-derive`, `zmij`
+
 ## [10.0.0]
 
 ### Breaking Changes
